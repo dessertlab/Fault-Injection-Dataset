@@ -55,6 +55,6 @@ Furthermore, for each round, there is the "`foreground_wl`" subfolder containing
 
 * `openstack_demo_workload-timestamp.err.log.bzip2.out` (contains the error messages during the workload execution, including both API Errors and Assertion Failures).
 
-Each subfolder "`Test_<id>/logs/round_number`" contains also the file "`trace_Test_<id>_round_number`". This file is a JSON file containing all the messages exchanged in OpenStack during the execution of the workload. These messages are collected through the distributed tracing system [Zipkin](https://zipkin.io/). For further details about the information collected, please refer to the paper [Enhancing Failure Propagation Analysis in Cloud Computing Systems](https://ieeexplore.ieee.org/document/8987476).
+Each subfolder "`Test_<id>/logs/round_number`" contains also the file "`trace_Test_<id>_round_number`". This file is a JSON file containing all the messages exchanged in OpenStack during the execution of the workload. These messages are collected with the distributed tracing system [Zipkin](https://zipkin.io/). For further details about the information collected, please refer to the paper [Enhancing Failure Propagation Analysis in Cloud Computing Systems](https://ieeexplore.ieee.org/document/8987476).
 
 Finally, in the subfolder "`Test_<id>/logs/round_1`", you can find the file "`trigger_log`" containing the timestamp of the fault activation during the workload execution.
