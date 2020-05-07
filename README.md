@@ -4,7 +4,7 @@
 This failure dataset contains the injected faults, the workload, the effects of failure (both the user-side impact and our own in-depth correctness checks), and the error logs produced by the OpenStack cloud management system.
 Please refers to the paper [How Bad Can a Bug Get? An Empirical Analysis of Software Failures in the OpenStack Cloud Computing Platform](https://dl.acm.org/doi/10.1145/3338906.3338916) accepted for presentation at the ESEC-FSE 2019 conference. 
 
-Please, **cite the paper** if you use the tools for your research:
+Please, **cite the paper** if you use the dataset for your research:
 
 ```
 @inproceedings{cotroneo2019bad,
