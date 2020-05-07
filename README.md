@@ -1,4 +1,4 @@
-# Fault-Injection-Dataset
+# README
 
 
 This failure dataset contains the injected faults, the workload, the effects of failure (both the user-side impact and our own in-depth correctness checks), and the error logs produced by the OpenStack cloud management system.
@@ -17,7 +17,7 @@ Please, **cite the paper** if you use the tools for your research:
 ```
 
 
-# Dataset Description
+## Dataset Description
 The **failure dataset** includes the raw logs from fault injection experiments in OpenStack. The tests are grouped per injected sub-system (i.e., Nova, Cinder, and Neutron). 
 
 There is a total of 480 tests: 231 for Nova, 125 for Cinder, and 124 for Neutron. The log of each experiment is saved in a folder named "Test_id", where "id" is an incremental number that identifies the test. See the `README.txt` file in the `dataset` directory for more details about the dataset. 
