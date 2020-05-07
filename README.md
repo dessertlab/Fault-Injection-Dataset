@@ -16,6 +16,8 @@ Please, **cite the paper** if you use the tools for your research:
 }
 ```
 
+In this [Github repository](https://github.com/dessertlab/OpenStack-Fault-Injection-Environment) you can find the tools to reproduce these experiments.
+
 
 ## 2. Project Organization
 
@@ -26,9 +28,16 @@ There is a total of 911 tests: 439 for Nova, 269 for Cinder, and 203 for Neutron
 
 ### 2.1 Structure of the test folders
 
-Every test folder contains the file "`fp_info.data`", which contains information about the fault injected in the experiment (including the fault type, the target component, the target class, the target function, and the fault injection point).
+Every test folder contains the following files:
+* "`fp_info.data`": It contains information about the fault injected in the experiment (including the fault type, the target component, the target class, the target function, and the fault injection point);
+* "`orig_file`": It contains the target component before the mutation;
+* "`mutated_file`": It contains the target component after the mutation;
+* "`diff`": It is the diff file between the orig_file and mutated_file;
 
-The subfolder "`Test_<id>`"/logs contains the raw logs of the executions of both the faulty round ("`round_1`" subfolder) and the fault-free round ("`round_2`" subfolder).
+
+
+
+The subfolder "`Test_<id>/logs`" contains the raw logs of the executions of both the faulty round ("`round_1`" subfolder) and the fault-free round ("`round_2`" subfolder).
 
 In each round subfolder, there are more subfolders representing different sub-systems of OpenStack (e.g., "`nova`", "`cinder`", "`neutron`", "`glance`", etc.) containing the log messages generated during the tests.
 
@@ -39,3 +48,7 @@ Furthermore, for each round, there is the "`foreground_wl`" subfolder containing
 * `openstack_demo_workload-timestamp.out.log.bzip2.out` (contains the log messages of the workload execution)
 
 * `openstack_demo_workload-timestamp.err.log.bzip2.out` (contains the error messages during the workload execution, including both API Errors and Assertion Failures).
+
+Each subfolder "`Test_<id>/logs/round_number`" contains also the file "`trace_Test_<id>_round_number`". This file is a JSON file containing all the messages exchanged in OpenStack during the execution of the workload. These messages are collected through the distributed tracing system [Zipkin](https://zipkin.io/). For further details about the information collected, please refer to the paper [Enhancing Failure Propagation Analysis in Cloud Computing Systems](https://ieeexplore.ieee.org/document/8987476).
+
+Finally, in the subfolder "`Test_<id>/logs/round_1`", you can find the file "`trigger_log`" containing the timestamp of the fault activation during the workload execution.
