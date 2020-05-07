@@ -16,14 +16,20 @@ Please, **cite the paper** if you use the tools for your research:
 }
 ```
 
-In this [Github repository](https://github.com/dessertlab/OpenStack-Fault-Injection-Environment) you can find the tools to reproduce these experiments.
-
 
 ## 2. Project Organization
 
 The **failure dataset** includes the raw logs from fault injection experiments in OpenStack. The tests are grouped per injected sub-system (i.e., Nova, Cinder, and Neutron). 
 
 There is a total of 911 tests: 439 for Nova, 269 for Cinder, and 203 for Neutron. The log of each experiment is saved in a folder named "`Test_id`", where "`id`" is an incremental number that identifies the test. 
+
+The files "`cinder.csv`", "`neutron.csv`" and "`nova.csv`" are csv file containing the failure analysis of the experiments. The csv files consist of three fields: 
+* **Test**, the "`Test_id`";
+* **Round_1 Failure**, contains "`yes`" if the experiment is failed in round 1, "`no`" if the experiment is not failed in the first round (faulty round).
+* **Round_2 Failure**, contains "`yes`" if the experiment is failed in round 2, "`no`" if the experiment is not failed in the second round (fault-free round).
+
+
+In this [Github repository](https://github.com/dessertlab/OpenStack-Fault-Injection-Environment) you can find the tools to reproduce these experiments.
 
 
 ### 2.1 Structure of the test folders
