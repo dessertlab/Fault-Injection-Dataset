@@ -1,0 +1,154 @@
+
+import random, binascii, threading, os
+
+def pycc_corrupt_string(string):
+    if string:
+        if (random.randint(0, 1) == 0):
+            hexstring = binascii.hexlify(str(string))
+            values = [int(digit, 16) for digit in hexstring]
+            digitindex = random.randint(0, len(values))
+            bitindex = random.randint(0, 3)
+            values[(digitindex - 1)] ^= (1 << bitindex)
+            result = ''.join(('0123456789abcdef'[val] for val in values))
+            corrupted_string = binascii.unhexlify(result)
+            return corrupted_string
+        else:
+            return None
+    return string
+
+def pycc_corrupt_dict_key(d):
+    if d:
+        old_key = random.choice(d.keys())
+        corrupted_key = pycc_corrupt(old_key)
+        d[corrupted_key] = d.pop(old_key)
+    return d
+
+def pycc_corrupt(target, mode=None):
+    if isinstance(target, int):
+        return (-1)
+    elif isinstance(target, str):
+        return pycc_corrupt_string(target)
+    elif isinstance(target, dict):
+        return pycc_corrupt_dict_key(target)
+    elif isinstance(target, bool):
+        return (not target)
+    else:
+        return None
+pycc_leaked_files = list()
+
+def _pycc_hog_fd():
+    try:
+        i = 0
+        files = []
+        pycc_leak_file_dir = '/tmp/pycc_file_leak_dir/'
+        os.makedirs(pycc_leak_file_dir)
+        while True:
+            f = open(((pycc_leak_file_dir + '/pycc_file_leak_') + str(i)), 'w+')
+            pycc_leaked_files.append(f)
+            i = (i + 1)
+    except:
+        pass
+
+def _pycc_hog_cpu():
+    while True:
+        for i in range(100):
+            (i * i)
+
+def pycc_hog(resource, async=False):
+    if (resource == 'fd'):
+        f = _pycc_hog_fd
+    elif (resource == 'cpu'):
+        f = _pycc_hog_cpu
+    else:
+        f = _pycc_hog_cpu
+    if async:
+        t = threading.Thread(target=f)
+        t.start()
+    else:
+        f()
+'Auth Components for Consoles.'
+import time
+from oslo_log import log as logging
+import oslo_messaging as messaging
+from oslo_serialization import jsonutils
+from nova import cache_utils
+from nova.cells import rpcapi as cells_rpcapi
+from nova.compute import rpcapi as compute_rpcapi
+import nova.conf
+from nova import context as nova_context
+from nova import manager
+from nova import objects
+LOG = logging.getLogger(__name__)
+CONF = nova.conf.CONF
+
+class ConsoleAuthManager(manager.Manager, ):
+    'Manages token based authentication.'
+    target = messaging.Target(version='2.1')
+
+    def __init__(self, scheduler_driver=None, *args, **kwargs):
+        super(ConsoleAuthManager, self).__init__(service_name='consoleauth', *args, **kwargs)
+        self._mc = None
+        self._mc_instance = None
+        self.compute_rpcapi = compute_rpcapi.ComputeAPI()
+        self.cells_rpcapi = cells_rpcapi.CellsAPI()
+
+    @property
+    def mc(self):
+        if (self._mc is None):
+            self._mc = cache_utils.get_client(CONF.consoleauth.token_ttl)
+        return self._mc
+
+    @property
+    def mc_instance(self):
+        if (self._mc_instance is None):
+            self._mc_instance = cache_utils.get_client()
+        return pycc_corrupt(self._mc_instance)
+
+    def reset(self):
+        LOG.info('Reloading compute RPC API')
+        compute_rpcapi.LAST_VERSION = None
+        self.compute_rpcapi = compute_rpcapi.ComputeAPI()
+
+    def _get_tokens_for_instance(self, instance_uuid):
+        tokens_str = self.mc_instance.get(instance_uuid.encode('UTF-8'))
+        if (not tokens_str):
+            tokens = []
+        else:
+            tokens = jsonutils.loads(tokens_str)
+        return tokens
+
+    def authorize_console(self, context, token, console_type, host, port, internal_access_path, instance_uuid, access_url=None):
+        token_dict = {'token': token, 'instance_uuid': instance_uuid, 'console_type': console_type, 'host': host, 'port': port, 'internal_access_path': internal_access_path, 'access_url': access_url, 'last_activity_at': time.time()}
+        data = jsonutils.dumps(token_dict)
+        self.mc.set(token.encode('UTF-8'), data)
+        tokens = self._get_tokens_for_instance(instance_uuid)
+        token_values = self.mc.get_multi([tok.encode('UTF-8') for tok in tokens])
+        tokens = [name for (name, value) in zip(tokens, token_values) if (value is not None)]
+        tokens.append(token)
+        self.mc_instance.set(instance_uuid.encode('UTF-8'), jsonutils.dumps(tokens))
+        LOG.info('Received Token: %(token)s, %(token_dict)s', {'token': token, 'token_dict': token_dict})
+
+    def _validate_token(self, context, token):
+        instance_uuid = token['instance_uuid']
+        if (instance_uuid is None):
+            return False
+        if CONF.cells.enable:
+            return self.cells_rpcapi.validate_console_port(context, instance_uuid, token['port'], token['console_type'])
+        mapping = objects.InstanceMapping.get_by_instance_uuid(context, instance_uuid)
+        with nova_context.target_cell(context, mapping.cell_mapping) as cctxt:
+            instance = objects.Instance.get_by_uuid(cctxt, instance_uuid)
+            return self.compute_rpcapi.validate_console_port(cctxt, instance, token['port'], token['console_type'])
+
+    def check_token(self, context, token):
+        token_str = self.mc.get(token.encode('UTF-8'))
+        token_valid = (token_str is not None)
+        LOG.info('Checking Token: %(token)s, %(token_valid)s', {'token': token, 'token_valid': token_valid})
+        if token_valid:
+            token = jsonutils.loads(token_str)
+            if self._validate_token(context, token):
+                return token
+
+    def delete_tokens_for_instance(self, context, instance_uuid):
+        tokens = self._get_tokens_for_instance(instance_uuid)
+        self.mc.delete_multi([tok.encode('UTF-8') for tok in tokens])
+        self.mc_instance.delete(instance_uuid.encode('UTF-8'))

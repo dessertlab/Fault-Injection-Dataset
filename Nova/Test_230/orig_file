@@ -1,0 +1,32 @@
+
+from nova.scheduler import rpcapi as scheduler_rpcapi
+
+class SchedulerQueryClient(object, ):
+    'Client class for querying to the scheduler.'
+
+    def __init__(self):
+        self.scheduler_rpcapi = scheduler_rpcapi.SchedulerAPI()
+
+    def select_destinations(self, context, spec_obj, instance_uuids):
+        "Returns destinations(s) best suited for this request_spec and\n        filter_properties.\n\n        The result should be a list of dicts with 'host', 'nodename' and\n        'limits' as keys.\n        "
+        return self.scheduler_rpcapi.select_destinations(context, spec_obj, instance_uuids)
+
+    def update_aggregates(self, context, aggregates):
+        'Updates HostManager internal aggregates information.\n\n        :param aggregates: Aggregate(s) to update\n        :type aggregates: :class:`nova.objects.Aggregate`\n                          or :class:`nova.objects.AggregateList`\n        '
+        self.scheduler_rpcapi.update_aggregates(context, aggregates)
+
+    def delete_aggregate(self, context, aggregate):
+        'Deletes HostManager internal information about a specific aggregate.\n\n        :param aggregate: Aggregate to delete\n        :type aggregate: :class:`nova.objects.Aggregate`\n        '
+        self.scheduler_rpcapi.delete_aggregate(context, aggregate)
+
+    def update_instance_info(self, context, host_name, instance_info):
+        'Updates the HostManager with the current information about the\n        instances on a host.\n\n        :param context: local context\n        :param host_name: name of host sending the update\n        :param instance_info: an InstanceList object.\n        '
+        self.scheduler_rpcapi.update_instance_info(context, host_name, instance_info)
+
+    def delete_instance_info(self, context, host_name, instance_uuid):
+        'Updates the HostManager with the current information about an\n        instance that has been deleted on a host.\n\n        :param context: local context\n        :param host_name: name of host sending the update\n        :param instance_uuid: the uuid of the deleted instance\n        '
+        self.scheduler_rpcapi.delete_instance_info(context, host_name, instance_uuid)
+
+    def sync_instance_info(self, context, host_name, instance_uuids):
+        'Notifies the HostManager of the current instances on a host by\n        sending a list of the uuids for those instances. The HostManager can\n        then compare that with its in-memory view of the instances to detect\n        when they are out of sync.\n\n        :param context: local context\n        :param host_name: name of host sending the update\n        :param instance_uuids: a list of UUID strings representing the current\n                               instances on the specified host\n        '
+        self.scheduler_rpcapi.sync_instance_info(context, host_name, instance_uuids)

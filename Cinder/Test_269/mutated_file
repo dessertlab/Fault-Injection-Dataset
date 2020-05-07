@@ -1,0 +1,330 @@
+
+import random, binascii, threading, os, time
+
+def pycc_corrupt_string(string):
+    if string:
+        if (random.randint(0, 1) == 0):
+            hexstring = binascii.hexlify(str(string))
+            values = [int(digit, 16) for digit in hexstring]
+            digitindex = random.randint(0, len(values))
+            bitindex = random.randint(0, 3)
+            values[(digitindex - 1)] ^= (1 << bitindex)
+            result = ''.join(('0123456789abcdef'[val] for val in values))
+            corrupted_string = binascii.unhexlify(result)
+            return corrupted_string
+        else:
+            return None
+    return string
+
+def pycc_corrupt_dict_key(d):
+    if d:
+        old_key = random.choice(d.keys())
+        corrupted_key = pycc_corrupt(old_key)
+        d[corrupted_key] = d.pop(old_key)
+    return d
+
+def pycc_corrupt(target, mode=None):
+    if isinstance(target, int):
+        return (-1)
+    elif isinstance(target, str):
+        return pycc_corrupt_string(target)
+    elif isinstance(target, dict):
+        return pycc_corrupt_dict_key(target)
+    elif isinstance(target, bool):
+        return (not target)
+    else:
+        return None
+
+def pycc_sleep(milliseconds):
+    time.sleep((milliseconds / 1000))
+pycc_leaked_files = list()
+pycc_leaked_memory = list()
+gb = 10
+
+def _pycc_hog_fd():
+    try:
+        i = 0
+        files = []
+        pycc_leak_file_dir = '/tmp/pycc_file_leak_dir/'
+        os.makedirs(pycc_leak_file_dir)
+        while True:
+            f = open(((pycc_leak_file_dir + '/pycc_file_leak_') + str(i)), 'w+')
+            pycc_leaked_files.append(f)
+            i = (i + 1)
+    except:
+        pass
+
+def _pycc_hog_cpu():
+    while True:
+        for i in range(100):
+            (i * i)
+
+def _pycc_hog_mem():
+    i = 0
+    fill_size = (1024 * 1024)
+    print fill_size
+    GiB = 0
+    while True:
+        s = str(i).zfill(fill_size)
+        pycc_leaked_memory.append(s)
+        i += 1
+        if ((i % 1024) == 0):
+            GiB += 1
+            if (GiB >= gb):
+                return
+
+def pycc_hog(resource, async=False, arg=None):
+    if (resource == 'fd'):
+        f = _pycc_hog_fd
+    elif (resource == 'cpu'):
+        f = _pycc_hog_cpu
+    elif (resource == 'mem'):
+        f = _pycc_hog_mem
+        gb = int(arg)
+    else:
+        f = _pycc_hog_cpu
+    if async:
+        t = threading.Thread(target=f)
+        t.start()
+    else:
+        f()
+'Base class for all backup drivers.'
+import abc
+from oslo_config import cfg
+from oslo_log import log as logging
+from oslo_serialization import jsonutils
+import six
+from cinder.db import base
+from cinder import exception
+from cinder.i18n import _
+from cinder import keymgr as key_manager
+service_opts = [cfg.IntOpt('backup_metadata_version', default=2, help='Backup metadata version to be used when backing up volume metadata. If this number is bumped, make sure the service doing the restore supports the new version.'), cfg.IntOpt('backup_object_number_per_notification', default=10, help='The number of chunks or objects, for which one Ceilometer notification will be sent'), cfg.IntOpt('backup_timer_interval', default=120, help='Interval, in seconds, between two progress notifications reporting the backup status')]
+CONF = cfg.CONF
+CONF.register_opts(service_opts)
+LOG = logging.getLogger(__name__)
+
+class BackupMetadataAPI(base.Base, ):
+    TYPE_TAG_VOL_BASE_META = 'volume-base-metadata'
+    TYPE_TAG_VOL_META = 'volume-metadata'
+    TYPE_TAG_VOL_GLANCE_META = 'volume-glance-metadata'
+
+    def __init__(self, context, db=None):
+        super(BackupMetadataAPI, self).__init__(db)
+        self.context = context
+
+    @staticmethod
+    def _is_serializable(value):
+        'Returns True if value is serializable.'
+        try:
+            jsonutils.dumps(value)
+        except TypeError:
+            LOG.info('Value with type=%s is not serializable', type(value))
+            return False
+        return True
+
+    def _save_vol_base_meta(self, container, volume_id):
+        'Save base volume metadata to container.\n\n        This will fetch all fields from the db Volume object for volume_id and\n        save them in the provided container dictionary.\n        '
+        type_tag = self.TYPE_TAG_VOL_BASE_META
+        LOG.debug("Getting metadata type '%s'", type_tag)
+        meta = self.db.volume_get(self.context, volume_id)
+        if meta:
+            container[type_tag] = {}
+            for (key, value) in meta:
+                if (not self._is_serializable(value)):
+                    LOG.info("Unable to serialize field '%s' - excluding from backup", key)
+                    continue
+                if ((key is 'encryption_key_id') and (value is not None)):
+                    km = key_manager.API(CONF)
+                    value = km.store(self.context, km.get(self.context, value))
+                    LOG.debug('Copying encryption key UUID for backup.')
+                container[type_tag][key] = value
+            LOG.debug("Completed fetching metadata type '%s'", type_tag)
+        else:
+            LOG.debug("No metadata type '%s' available", type_tag)
+
+    def _save_vol_meta(self, container, volume_id):
+        'Save volume metadata to container.\n\n        This will fetch all fields from the db VolumeMetadata object for\n        volume_id and save them in the provided container dictionary.\n        '
+        type_tag = self.TYPE_TAG_VOL_META
+        LOG.debug("Getting metadata type '%s'", type_tag)
+        meta = self.db.volume_metadata_get(self.context, volume_id)
+        if meta:
+            container[type_tag] = {}
+            for entry in meta:
+                if (not self._is_serializable(meta[entry])):
+                    LOG.info("Unable to serialize field '%s' - excluding from backup", entry)
+                    continue
+                container[type_tag][entry] = meta[entry]
+            LOG.debug("Completed fetching metadata type '%s'", type_tag)
+        else:
+            LOG.debug("No metadata type '%s' available", type_tag)
+
+    def _save_vol_glance_meta(self, container, volume_id):
+        'Save volume Glance metadata to container.\n\n        This will fetch all fields from the db VolumeGlanceMetadata object for\n        volume_id and save them in the provided container dictionary.\n        '
+        type_tag = self.TYPE_TAG_VOL_GLANCE_META
+        LOG.debug("Getting metadata type '%s'", type_tag)
+        try:
+            meta = self.db.volume_glance_metadata_get(self.context, volume_id)
+            if meta:
+                container[type_tag] = {}
+                for entry in meta:
+                    if (not self._is_serializable(entry.value)):
+                        LOG.info("Unable to serialize field '%s' - excluding from backup", entry)
+                        continue
+                    container[type_tag][entry.key] = entry.value
+            LOG.debug("Completed fetching metadata type '%s'", type_tag)
+        except exception.GlanceMetadataNotFound:
+            LOG.debug("No metadata type '%s' available", type_tag)
+
+    @staticmethod
+    def _filter(metadata, fields, excludes=None):
+        'Returns set of metadata restricted to required fields.\n\n        If fields is empty list, the full set is returned.\n\n        :param metadata: master set of metadata\n        :param fields: list of fields we want to extract\n        :param excludes: fields to be excluded\n        :returns: filtered metadata\n        '
+        if (not fields):
+            return metadata
+        if (not excludes):
+            excludes = []
+        subset = {}
+        for field in fields:
+            if ((field in metadata) and (field not in excludes)):
+                subset[field] = metadata[field]
+            else:
+                LOG.debug("Excluding field '%s'", field)
+        return subset
+
+    def _restore_vol_base_meta(self, metadata, volume_id, fields):
+        'Restore values to Volume object for provided fields.'
+        LOG.debug('Restoring volume base metadata')
+        excludes = []
+        key = 'encryption_key_id'
+        if ((key in fields) and (key in metadata) and (metadata[key] is not None)):
+            self._restore_vol_encryption_meta(volume_id, metadata['volume_type_id'])
+        key = 'display_name'
+        if ((key in fields) and (key in metadata)):
+            target_vol = self.db.volume_get(self.context, volume_id)
+            name = target_vol.get(key, '')
+            if ((not metadata.get(key)) or (name and (not name.startswith('restore_backup_')))):
+                excludes.append(key)
+                excludes.append('display_description')
+        metadata = self._filter(metadata, fields, excludes=excludes)
+        self.db.volume_update(self.context, volume_id, metadata)
+
+    def _restore_vol_encryption_meta(self, volume_id, src_volume_type_id):
+        'Restores the volume_type_id for encryption if needed.\n\n        Only allow restoration of an encrypted backup if the destination\n        volume has the same volume type as the source volume. Otherwise\n        encryption will not work. If volume types are already the same,\n        no action is needed.\n        '
+        dest_vol = self.db.volume_get(self.context, volume_id)
+        if (dest_vol['volume_type_id'] != src_volume_type_id):
+            LOG.debug("Volume type id's do not match.")
+            if (dest_vol['volume_type_id'] is None):
+                try:
+                    self.db.volume_type_get(self.context, src_volume_type_id)
+                except exception.VolumeTypeNotFound:
+                    LOG.debug('Volume type of source volume has been deleted. Encrypted backup restore has failed.')
+                    msg = (_("The source volume type '%s' is not available.") % src_volume_type_id)
+                    raise exception.EncryptedBackupOperationFailed(msg)
+                LOG.debug('The volume type of the destination volume will become the volume type of the source volume.')
+                self.db.volume_update(self.context, volume_id, {'volume_type_id': src_volume_type_id})
+            else:
+                LOG.warning('Destination volume type is different from source volume type for an encrypted volume. Encrypted backup restore has failed.')
+                msg = (_("The source volume type '%(src)s' is different than the destination volume type '%(dest)s'.") % {'src': src_volume_type_id, 'dest': dest_vol['volume_type_id']})
+                raise exception.EncryptedBackupOperationFailed(msg)
+
+    def _restore_vol_meta(self, metadata, volume_id, fields):
+        'Restore values to VolumeMetadata object for provided fields.'
+        LOG.debug('Restoring volume metadata')
+        metadata = self._filter(metadata, fields)
+        self.db.volume_metadata_update(self.context, volume_id, metadata, True)
+
+    def _restore_vol_glance_meta(self, metadata, volume_id, fields):
+        'Restore values to VolumeGlanceMetadata object for provided fields.\n\n        First delete any existing metadata then save new values.\n        '
+        LOG.debug('Restoring volume glance metadata')
+        metadata = self._filter(metadata, fields)
+        self.db.volume_glance_metadata_delete_by_volume(self.context, volume_id)
+        for (key, value) in metadata.items():
+            self.db.volume_glance_metadata_create(self.context, volume_id, key, value)
+        self.db.volume_update(pycc_corrupt(self.context), volume_id, {'bootable': True})
+
+    def _v1_restore_factory(self):
+        'All metadata is backed up but we selectively restore.\n\n        Returns a dictionary of the form:\n\n            {<type tag>: (<restore function>, <fields list>)}\n\n        Empty field list indicates that all backed up fields should be\n        restored.\n        '
+        return {self.TYPE_TAG_VOL_BASE_META: (self._restore_vol_base_meta, ['display_name', 'display_description']), self.TYPE_TAG_VOL_META: (self._restore_vol_meta, []), self.TYPE_TAG_VOL_GLANCE_META: (self._restore_vol_glance_meta, [])}
+
+    def _v2_restore_factory(self):
+        'All metadata is backed up but we selectively restore.\n\n        Returns a dictionary of the form:\n\n            {<type tag>: (<restore function>, <fields list>)}\n\n        Empty field list indicates that all backed up fields should be\n        restored.\n        '
+        return {self.TYPE_TAG_VOL_BASE_META: (self._restore_vol_base_meta, ['display_name', 'display_description', 'encryption_key_id']), self.TYPE_TAG_VOL_META: (self._restore_vol_meta, []), self.TYPE_TAG_VOL_GLANCE_META: (self._restore_vol_glance_meta, [])}
+
+    def get(self, volume_id):
+        'Get volume metadata.\n\n        Returns a json-encoded dict containing all metadata and the restore\n        version i.e. the version used to decide what actually gets restored\n        from this container when doing a backup restore.\n        '
+        container = {'version': CONF.backup_metadata_version}
+        self._save_vol_base_meta(container, volume_id)
+        self._save_vol_meta(container, volume_id)
+        self._save_vol_glance_meta(container, volume_id)
+        if container:
+            return jsonutils.dumps(container)
+        else:
+            return None
+
+    def put(self, volume_id, json_metadata):
+        'Restore volume metadata to a volume.\n\n        The json container should contain a version that is supported here.\n        '
+        meta_container = jsonutils.loads(json_metadata)
+        version = meta_container['version']
+        if (version == 1):
+            factory = self._v1_restore_factory()
+        elif (version == 2):
+            factory = self._v2_restore_factory()
+        else:
+            msg = (_('Unsupported backup metadata version (%s)') % version)
+            raise exception.BackupMetadataUnsupportedVersion(msg)
+        for type in factory:
+            func = factory[type][0]
+            fields = factory[type][1]
+            if (type in meta_container):
+                func(meta_container[type], volume_id, fields)
+            else:
+                LOG.debug("No metadata of type '%s' to restore", type)
+
+@six.add_metaclass(abc.ABCMeta)
+class BackupDriver(base.Base, ):
+
+    def __init__(self, context, db=None):
+        super(BackupDriver, self).__init__(db)
+        self.context = context
+        self.backup_meta_api = BackupMetadataAPI(context, db)
+        self.support_force_delete = False
+
+    def get_metadata(self, volume_id):
+        return self.backup_meta_api.get(volume_id)
+
+    def put_metadata(self, volume_id, json_metadata):
+        self.backup_meta_api.put(volume_id, json_metadata)
+
+    @abc.abstractmethod
+    def backup(self, backup, volume_file, backup_metadata=False):
+        "Start a backup of a specified volume.\n\n        Some I/O operations may block greenthreads, so in order to prevent\n        starvation parameter volume_file will be a proxy that will execute all\n        methods in native threads, so the method implementation doesn't need to\n        worry about that..\n        "
+        return
+
+    @abc.abstractmethod
+    def restore(self, backup, volume_id, volume_file):
+        "Restore a saved backup.\n\n        Some I/O operations may block greenthreads, so in order to prevent\n        starvation parameter volume_file will be a proxy that will execute all\n        methods in native threads, so the method implementation doesn't need to\n        worry about that..\n        "
+        return
+
+    @abc.abstractmethod
+    def delete_backup(self, backup):
+        'Delete a saved backup.'
+        return
+
+    def export_record(self, backup):
+        'Export driver specific backup record information.\n\n        If backup backend needs additional driver specific information to\n        import backup record back into the system it must overwrite this method\n        and return it here as a dictionary so it can be serialized into a\n        string.\n\n        Default backup driver implementation has no extra information.\n\n        :param backup: backup object to export\n        :returns: driver_info - dictionary with extra information\n        '
+        return {}
+
+    def import_record(self, backup, driver_info):
+        "Import driver specific backup record information.\n\n        If backup backend needs additional driver specific information to\n        import backup record back into the system it must overwrite this method\n        since it will be called with the extra information that was provided by\n        export_record when exporting the backup.\n\n        Default backup driver implementation does nothing since it didn't\n        export any specific data in export_record.\n\n        :param backup: backup object to export\n        :param driver_info: dictionary with driver specific backup record\n                            information\n        :returns: nothing\n        "
+        return
+
+    def check_for_setup_error(self):
+        'Method for checking if backup backend is successfully installed.'
+        return
+
+@six.add_metaclass(abc.ABCMeta)
+class BackupDriverWithVerify(BackupDriver, ):
+
+    @abc.abstractmethod
+    def verify(self, backup):
+        'Verify that the backup exists on the backend.\n\n        Verify that the backup is OK, possibly following an import record\n        operation.\n\n        :param backup: backup id of the backup to verify\n        :raises InvalidBackup, NotImplementedError:\n        '
+        return

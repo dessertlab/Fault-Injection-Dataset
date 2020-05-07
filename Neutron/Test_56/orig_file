@@ -1,0 +1,153 @@
+
+from keystoneauth1 import loading as ks_loading
+from neutron_lib.callbacks import events
+from neutron_lib.callbacks import registry
+from neutron_lib.callbacks import resources
+from neutron_lib import constants
+from neutron_lib import context
+from neutron_lib import exceptions as exc
+from neutron_lib.plugins import directory
+from novaclient import api_versions
+from novaclient import client as nova_client
+from novaclient import exceptions as nova_exceptions
+from oslo_config import cfg
+from oslo_log import log as logging
+from oslo_utils import uuidutils
+from sqlalchemy.orm import attributes as sql_attr
+from neutron.notifiers import batch_notifier
+LOG = logging.getLogger(__name__)
+VIF_UNPLUGGED = 'network-vif-unplugged'
+VIF_PLUGGED = 'network-vif-plugged'
+VIF_DELETED = 'network-vif-deleted'
+NEUTRON_NOVA_EVENT_STATUS_MAP = {constants.PORT_STATUS_ACTIVE: 'completed', constants.PORT_STATUS_ERROR: 'failed', constants.PORT_STATUS_DOWN: 'completed'}
+NOVA_API_VERSION = '2.1'
+
+@registry.has_registry_receivers
+class Notifier(object, ):
+    _instance = None
+
+    @classmethod
+    def get_instance(cls):
+        if (cls._instance is None):
+            cls._instance = cls()
+        return cls._instance
+
+    def __init__(self):
+        auth = ks_loading.load_auth_from_conf_options(cfg.CONF, 'nova')
+        session = ks_loading.load_session_from_conf_options(cfg.CONF, 'nova', auth=auth)
+        extensions = [ext for ext in nova_client.discover_extensions(NOVA_API_VERSION) if (ext.name == 'server_external_events')]
+        self.nclient = nova_client.Client(api_versions.APIVersion(NOVA_API_VERSION), session=session, region_name=cfg.CONF.nova.region_name, endpoint_type=cfg.CONF.nova.endpoint_type, extensions=extensions)
+        self.batch_notifier = batch_notifier.BatchNotifier(cfg.CONF.send_events_interval, self.send_events)
+
+    def _is_compute_port(self, port):
+        try:
+            if (port['device_id'] and uuidutils.is_uuid_like(port['device_id']) and port['device_owner'].startswith(constants.DEVICE_OWNER_COMPUTE_PREFIX)):
+                return True
+        except (KeyError, AttributeError):
+            pass
+        return False
+
+    def _get_network_changed_event(self, port):
+        return {'name': 'network-changed', 'server_uuid': port['device_id'], 'tag': port['id']}
+
+    def _get_port_delete_event(self, port):
+        return {'server_uuid': port['device_id'], 'name': VIF_DELETED, 'tag': port['id']}
+
+    @registry.receives(resources.PORT, [events.BEFORE_RESPONSE])
+    @registry.receives(resources.FLOATING_IP, [events.BEFORE_RESPONSE])
+    def _send_nova_notification(self, resource, event, trigger, action=None, original=None, data=None, **kwargs):
+        self.send_network_change(action, original, data)
+
+    def send_network_change(self, action, original_obj, returned_obj):
+        'Called when a network change is made that nova cares about.\n\n        :param action: the event that occurred.\n        :param original_obj: the previous value of resource before action.\n        :param returned_obj: the body returned to client as result of action.\n        '
+        if (not cfg.CONF.notify_nova_on_port_data_changes):
+            return
+        if ((action == 'update_floatingip') and returned_obj['floatingip'].get('port_id') and original_obj.get('port_id')):
+            disassociate_returned_obj = {'floatingip': {'port_id': None}}
+            event = self.create_port_changed_event(action, original_obj, disassociate_returned_obj)
+            self.batch_notifier.queue_event(event)
+        event = self.create_port_changed_event(action, original_obj, returned_obj)
+        self.batch_notifier.queue_event(event)
+
+    def create_port_changed_event(self, action, original_obj, returned_obj):
+        port = None
+        if (action in ['update_port', 'delete_port']):
+            port = returned_obj['port']
+        elif (action in ['update_floatingip', 'create_floatingip', 'delete_floatingip']):
+            port_id = (returned_obj['floatingip'].get('port_id') or original_obj.get('port_id'))
+            if (port_id is None):
+                return
+            ctx = context.get_admin_context()
+            try:
+                port = directory.get_plugin().get_port(ctx, port_id)
+            except exc.PortNotFound:
+                LOG.debug('Port %s was deleted, no need to send any notification', port_id)
+                return
+        if (port and self._is_compute_port(port)):
+            if (action == 'delete_port'):
+                return self._get_port_delete_event(port)
+            else:
+                return self._get_network_changed_event(port)
+
+    def _can_notify(self, port):
+        if (not port.id):
+            LOG.warning('Port ID not set! Nova will not be notified of port status change.')
+            return False
+        if (not port.device_id):
+            LOG.debug('device_id is not set on port %s yet.', port.id)
+            return False
+        if (not self._is_compute_port(port)):
+            return False
+        return True
+
+    def record_port_status_changed(self, port, current_port_status, previous_port_status, initiator):
+        'Determine if nova needs to be notified due to port status change.\n        '
+        port._notify_event = None
+        if (not self._can_notify(port)):
+            return
+        if ((previous_port_status == constants.PORT_STATUS_ACTIVE) and (current_port_status == constants.PORT_STATUS_DOWN)):
+            event_name = VIF_UNPLUGGED
+        elif ((previous_port_status in [sql_attr.NO_VALUE, constants.PORT_STATUS_DOWN, constants.PORT_STATUS_BUILD]) and (current_port_status in [constants.PORT_STATUS_ACTIVE, constants.PORT_STATUS_ERROR])):
+            event_name = VIF_PLUGGED
+        else:
+            LOG.debug('Ignoring state change previous_port_status: %(pre_status)s current_port_status: %(cur_status)s port_id %(id)s', {'pre_status': previous_port_status, 'cur_status': current_port_status, 'id': port.id})
+            return
+        port._notify_event = {'server_uuid': port.device_id, 'name': event_name, 'status': NEUTRON_NOVA_EVENT_STATUS_MAP.get(current_port_status), 'tag': port.id}
+
+    def send_port_status(self, mapper, connection, port):
+        event = getattr(port, '_notify_event', None)
+        self.batch_notifier.queue_event(event)
+        port._notify_event = None
+
+    def notify_port_active_direct(self, port):
+        "Notify nova about active port\n\n        Used when port was wired on the host other than port's current host\n        according to port binding. This happens during live migration.\n        In this case ml2 plugin skips port status update but we still we need\n        to notify nova.\n        "
+        if (not self._can_notify(port)):
+            return
+        port._notify_event = {'server_uuid': port.device_id, 'name': VIF_PLUGGED, 'status': 'completed', 'tag': port.id}
+        self.send_port_status(None, None, port)
+
+    def send_events(self, batched_events):
+        LOG.debug('Sending events: %s', batched_events)
+        try:
+            response = self.nclient.server_external_events.create(batched_events)
+        except nova_exceptions.NotFound:
+            LOG.debug('Nova returned NotFound for event: %s', batched_events)
+        except Exception:
+            LOG.exception('Failed to notify nova on events: %s', batched_events)
+        else:
+            if (not isinstance(response, list)):
+                LOG.error('Error response returned from nova: %s', response)
+                return
+            response_error = False
+            for event in response:
+                try:
+                    code = event['code']
+                except KeyError:
+                    response_error = True
+                    continue
+                if (code != 200):
+                    LOG.warning('Nova event: %s returned with failed status', event)
+                else:
+                    LOG.info('Nova event response: %s', event)
+            if response_error:
+                LOG.error('Error response returned from nova: %s', response)

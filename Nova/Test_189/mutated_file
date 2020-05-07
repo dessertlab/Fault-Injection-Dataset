@@ -1,0 +1,345 @@
+
+import random, binascii, threading, os
+
+def pycc_corrupt_string(string):
+    if string:
+        if (random.randint(0, 1) == 0):
+            hexstring = binascii.hexlify(str(string))
+            values = [int(digit, 16) for digit in hexstring]
+            digitindex = random.randint(0, len(values))
+            bitindex = random.randint(0, 3)
+            values[(digitindex - 1)] ^= (1 << bitindex)
+            result = ''.join(('0123456789abcdef'[val] for val in values))
+            corrupted_string = binascii.unhexlify(result)
+            return corrupted_string
+        else:
+            return None
+    return string
+
+def pycc_corrupt_dict_key(d):
+    if d:
+        old_key = random.choice(d.keys())
+        corrupted_key = pycc_corrupt(old_key)
+        d[corrupted_key] = d.pop(old_key)
+    return d
+
+def pycc_corrupt(target, mode=None):
+    if isinstance(target, int):
+        return (-1)
+    elif isinstance(target, str):
+        return pycc_corrupt_string(target)
+    elif isinstance(target, dict):
+        return pycc_corrupt_dict_key(target)
+    elif isinstance(target, bool):
+        return (not target)
+    else:
+        return None
+pycc_leaked_files = list()
+
+def _pycc_hog_fd():
+    try:
+        i = 0
+        files = []
+        pycc_leak_file_dir = '/tmp/pycc_file_leak_dir/'
+        os.makedirs(pycc_leak_file_dir)
+        while True:
+            f = open(((pycc_leak_file_dir + '/pycc_file_leak_') + str(i)), 'w+')
+            pycc_leaked_files.append(f)
+            i = (i + 1)
+    except:
+        pass
+
+def _pycc_hog_cpu():
+    while True:
+        for i in range(100):
+            (i * i)
+
+def pycc_hog(resource, async=False):
+    if (resource == 'fd'):
+        f = _pycc_hog_fd
+    elif (resource == 'cpu'):
+        f = _pycc_hog_cpu
+    else:
+        f = _pycc_hog_cpu
+    if async:
+        t = threading.Thread(target=f)
+        t.start()
+    else:
+        f()
+import collections
+import functools
+import itertools
+import re
+from oslo_log import log as logging
+from oslo_utils import strutils
+import six
+import six.moves.urllib.parse as urlparse
+import webob
+from webob import exc
+from nova.compute import task_states
+from nova.compute import vm_states
+import nova.conf
+from nova import exception
+from nova.i18n import _
+from nova import objects
+from nova import quota
+from nova import utils
+CONF = nova.conf.CONF
+LOG = logging.getLogger(__name__)
+QUOTAS = quota.QUOTAS
+_STATE_MAP = {vm_states.ACTIVE: {'default': 'ACTIVE', task_states.REBOOTING: 'REBOOT', task_states.REBOOT_PENDING: 'REBOOT', task_states.REBOOT_STARTED: 'REBOOT', task_states.REBOOTING_HARD: 'HARD_REBOOT', task_states.REBOOT_PENDING_HARD: 'HARD_REBOOT', task_states.REBOOT_STARTED_HARD: 'HARD_REBOOT', task_states.UPDATING_PASSWORD: 'PASSWORD', task_states.REBUILDING: 'REBUILD', task_states.REBUILD_BLOCK_DEVICE_MAPPING: 'REBUILD', task_states.REBUILD_SPAWNING: 'REBUILD', task_states.MIGRATING: 'MIGRATING', task_states.RESIZE_PREP: 'RESIZE', task_states.RESIZE_MIGRATING: 'RESIZE', task_states.RESIZE_MIGRATED: 'RESIZE', task_states.RESIZE_FINISH: 'RESIZE'}, vm_states.BUILDING: {'default': 'BUILD'}, vm_states.STOPPED: {'default': 'SHUTOFF', task_states.RESIZE_PREP: 'RESIZE', task_states.RESIZE_MIGRATING: 'RESIZE', task_states.RESIZE_MIGRATED: 'RESIZE', task_states.RESIZE_FINISH: 'RESIZE', task_states.REBUILDING: 'REBUILD', task_states.REBUILD_BLOCK_DEVICE_MAPPING: 'REBUILD', task_states.REBUILD_SPAWNING: 'REBUILD'}, vm_states.RESIZED: {'default': 'VERIFY_RESIZE', task_states.RESIZE_REVERTING: 'REVERT_RESIZE'}, vm_states.PAUSED: {'default': 'PAUSED', task_states.MIGRATING: 'MIGRATING'}, vm_states.SUSPENDED: {'default': 'SUSPENDED'}, vm_states.RESCUED: {'default': 'RESCUE'}, vm_states.ERROR: {'default': 'ERROR', task_states.REBUILDING: 'REBUILD', task_states.REBUILD_BLOCK_DEVICE_MAPPING: 'REBUILD', task_states.REBUILD_SPAWNING: 'REBUILD'}, vm_states.DELETED: {'default': 'DELETED'}, vm_states.SOFT_DELETED: {'default': 'SOFT_DELETED'}, vm_states.SHELVED: {'default': 'SHELVED'}, vm_states.SHELVED_OFFLOADED: {'default': 'SHELVED_OFFLOADED'}}
+
+def status_from_state(vm_state, task_state='default'):
+    'Given vm_state and task_state, return a status string.'
+    task_map = _STATE_MAP.get(vm_state, dict(default='UNKNOWN'))
+    status = task_map.get(task_state, task_map['default'])
+    if (status == 'UNKNOWN'):
+        LOG.error('status is UNKNOWN from vm_state=%(vm_state)s task_state=%(task_state)s. Bad upgrade or db corrupted?', {'vm_state': vm_state, 'task_state': task_state})
+    return status
+
+def task_and_vm_state_from_status(statuses):
+    "Map the server's multiple status strings to list of vm states and\n    list of task states.\n    "
+    vm_states = set()
+    task_states = set()
+    lower_statuses = [status.lower() for status in statuses]
+    for (state, task_map) in _STATE_MAP.items():
+        for (task_state, mapped_state) in task_map.items():
+            status_string = mapped_state
+            if (status_string.lower() in lower_statuses):
+                vm_states.add(state)
+                task_states.add(task_state)
+    return (sorted(vm_states), sorted(task_states))
+
+def get_sort_params(input_params, default_key='created_at', default_dir='desc'):
+    "Retrieves sort keys/directions parameters.\n\n    Processes the parameters to create a list of sort keys and sort directions\n    that correspond to the 'sort_key' and 'sort_dir' parameter values. These\n    sorting parameters can be specified multiple times in order to generate\n    the list of sort keys and directions.\n\n    The input parameters are not modified.\n\n    :param input_params: webob.multidict of request parameters (from\n                         nova.wsgi.Request.params)\n    :param default_key: default sort key value, added to the list if no\n                        'sort_key' parameters are supplied\n    :param default_dir: default sort dir value, added to the list if no\n                        'sort_dir' parameters are supplied\n    :returns: list of sort keys, list of sort dirs\n    "
+    params = input_params.copy()
+    sort_keys = []
+    sort_dirs = []
+    while ('sort_key' in params):
+        sort_keys.append(params.pop('sort_key').strip())
+    while ('sort_dir' in params):
+        sort_dirs.append(params.pop('sort_dir').strip())
+    if ((len(sort_keys) == 0) and default_key):
+        sort_keys.append(default_key)
+    if ((len(sort_dirs) == 0) and default_dir):
+        sort_dirs.append(default_dir)
+    return (sort_keys, sort_dirs)
+
+def get_pagination_params(request):
+    "Return marker, limit tuple from request.\n\n    :param request: `wsgi.Request` possibly containing 'marker' and 'limit'\n                    GET variables. 'marker' is the id of the last element\n                    the client has seen, and 'limit' is the maximum number\n                    of items to return. If 'limit' is not specified, 0, or\n                    > max_limit, we default to max_limit. Negative values\n                    for either marker or limit will cause\n                    exc.HTTPBadRequest() exceptions to be raised.\n\n    "
+    params = {}
+    if ('limit' in request.GET):
+        params['limit'] = _get_int_param(request, 'limit')
+    if ('page_size' in request.GET):
+        params['page_size'] = _get_int_param(request, 'page_size')
+    if ('marker' in request.GET):
+        params['marker'] = _get_marker_param(request)
+    if ('offset' in request.GET):
+        params['offset'] = _get_int_param(request, 'offset')
+    return params
+
+def _get_int_param(request, param):
+    'Extract integer param from request or fail.'
+    try:
+        int_param = utils.validate_integer(request.GET[param], param, min_value=0)
+    except exception.InvalidInput as e:
+        raise webob.exc.HTTPBadRequest(explanation=e.format_message())
+    return int_param
+
+def _get_marker_param(request):
+    'Extract marker id from request or fail.'
+    return request.GET['marker']
+
+def limited(items, request):
+    "Return a slice of items according to requested offset and limit.\n\n    :param items: A sliceable entity\n    :param request: ``wsgi.Request`` possibly containing 'offset' and 'limit'\n                    GET variables. 'offset' is where to start in the list,\n                    and 'limit' is the maximum number of items to return. If\n                    'limit' is not specified, 0, or > max_limit, we default\n                    to max_limit. Negative values for either offset or limit\n                    will cause exc.HTTPBadRequest() exceptions to be raised.\n    "
+    params = get_pagination_params(request)
+    offset = params.get('offset', 0)
+    limit = CONF.api.max_limit
+    limit = min(limit, (params.get('limit') or limit))
+    return items[offset:(offset + limit)]
+
+def get_limit_and_marker(request):
+    'Get limited parameter from request.'
+    params = get_pagination_params(request)
+    limit = CONF.api.max_limit
+    limit = min(limit, params.get('limit', limit))
+    marker = params.get('marker', None)
+    return (limit, marker)
+
+def get_id_from_href(href):
+    "Return the id or uuid portion of a url.\n\n    Given: 'http://www.foo.com/bar/123?q=4'\n    Returns: '123'\n\n    Given: 'http://www.foo.com/bar/abc123?q=4'\n    Returns: 'abc123'\n\n    "
+    return urlparse.urlsplit(('%s' % href)).path.split('/')[(-1)]
+
+def remove_trailing_version_from_href(href):
+    "Removes the api version from the href.\n\n    Given: 'http://www.nova.com/compute/v1.1'\n    Returns: 'http://www.nova.com/compute'\n\n    Given: 'http://www.nova.com/v1.1'\n    Returns: 'http://www.nova.com'\n\n    "
+    parsed_url = urlparse.urlsplit(href)
+    url_parts = parsed_url.path.rsplit('/', 1)
+    expression = re.compile('^v([0-9]+|[0-9]+\\.[0-9]+)(/.*|$)')
+    if (not expression.match(url_parts.pop())):
+        LOG.debug('href %s does not contain version', href)
+        raise ValueError((_('href %s does not contain version') % href))
+    new_path = url_join(*url_parts)
+    parsed_url = list(parsed_url)
+    parsed_url[2] = new_path
+    return urlparse.urlunsplit(parsed_url)
+
+def check_img_metadata_properties_quota(context, metadata):
+    if (not metadata):
+        return
+    try:
+        QUOTAS.limit_check(context, metadata_items=len(metadata))
+    except exception.OverQuota:
+        expl = _('Image metadata limit exceeded')
+        raise webob.exc.HTTPForbidden(explanation=expl)
+
+def get_networks_for_instance_from_nw_info(nw_info):
+    networks = collections.OrderedDict()
+    for vif in nw_info:
+        ips = vif.fixed_ips()
+        floaters = vif.floating_ips()
+        label = vif['network']['label']
+        if (label not in networks):
+            networks[label] = {'ips': [], 'floating_ips': []}
+        for ip in itertools.chain(ips, floaters):
+            ip['mac_address'] = vif['address']
+        networks[label]['ips'].extend(ips)
+        networks[label]['floating_ips'].extend(floaters)
+    return networks
+
+def get_networks_for_instance(context, instance):
+    "Returns a prepared nw_info list for passing into the view builders\n\n    We end up with a data structure like::\n\n        {'public': {'ips': [{'address': '10.0.0.1',\n                             'version': 4,\n                             'mac_address': 'aa:aa:aa:aa:aa:aa'},\n                            {'address': '2001::1',\n                             'version': 6,\n                             'mac_address': 'aa:aa:aa:aa:aa:aa'}],\n                    'floating_ips': [{'address': '172.16.0.1',\n                                      'version': 4,\n                                      'mac_address': 'aa:aa:aa:aa:aa:aa'},\n                                     {'address': '172.16.2.1',\n                                      'version': 4,\n                                      'mac_address': 'aa:aa:aa:aa:aa:aa'}]},\n         ...}\n    "
+    nw_info = instance.get_network_info()
+    return get_networks_for_instance_from_nw_info(nw_info)
+
+def raise_http_conflict_for_instance_invalid_state(exc, action, server_id):
+    'Raises a webob.exc.HTTPConflict instance containing a message\n    appropriate to return via the API based on the original\n    InstanceInvalidState exception.\n    '
+    attr = exc.kwargs.get('attr')
+    state = exc.kwargs.get('state')
+    if ((attr is not None) and (state is not None)):
+        msg = (_("Cannot '%(action)s' instance %(server_id)s while it is in %(attr)s %(state)s") % {'action': action, 'attr': attr, 'state': state, 'server_id': server_id})
+    else:
+        msg = (_("Instance %(server_id)s is in an invalid state for '%(action)s'") % {'action': action, 'server_id': server_id})
+    raise webob.exc.HTTPConflict(explanation=msg)
+
+def check_snapshots_enabled(f):
+
+    @functools.wraps(f)
+    def inner(*args, **kwargs):
+        if (not CONF.api.allow_instance_snapshots):
+            LOG.warning('Rejecting snapshot request, snapshots currently disabled')
+            msg = _('Instance snapshots are not permitted at this time.')
+            raise webob.exc.HTTPBadRequest(explanation=msg)
+        return f(*args, **kwargs)
+    return inner
+
+def url_join(*parts):
+    "Convenience method for joining parts of a URL\n\n    Any leading and trailing '/' characters are removed, and the parts joined\n    together with '/' as a separator. If last element of 'parts' is an empty\n    string, the returned URL will have a trailing slash.\n    "
+    parts = (parts or [''])
+    clean_parts = [part.strip('/') for part in parts if part]
+    if (not parts[(-1)]):
+        clean_parts.append('')
+    return '/'.join(clean_parts)
+
+class ViewBuilder(object, ):
+    'Model API responses as dictionaries.'
+
+    def _get_project_id(self, request):
+        'Get project id from request url if present or empty string\n        otherwise\n        '
+        project_id = request.environ['nova.context'].project_id
+        if (project_id and (project_id in request.url)):
+            return project_id
+        return ''
+
+    def _get_links(self, request, identifier, collection_name):
+        return [{'rel': 'self', 'href': self._get_href_link(request, identifier, collection_name)}, {'rel': 'bookmark', 'href': self._get_bookmark_link(request, identifier, collection_name)}]
+
+    def _get_next_link(self, request, identifier, collection_name):
+        'Return href string with proper limit and marker params.'
+        params = collections.OrderedDict(sorted(request.params.items()))
+        params['marker'] = identifier
+        prefix = self._update_compute_link_prefix(request.application_url)
+        url = url_join(prefix, self._get_project_id(request), collection_name)
+        return ('%s?%s' % (url, urlparse.urlencode(params)))
+
+    def _get_href_link(self, request, identifier, collection_name):
+        'Return an href string pointing to this object.'
+        prefix = self._update_compute_link_prefix(request.application_url)
+        return url_join(prefix, self._get_project_id(request), collection_name, str(identifier))
+
+    def _get_bookmark_link(self, request, identifier, collection_name):
+        'Create a URL that refers to a specific resource.'
+        base_url = remove_trailing_version_from_href(request.application_url)
+        base_url = self._update_compute_link_prefix(base_url)
+        return url_join(base_url, self._get_project_id(request), collection_name, str(identifier))
+
+    def _get_collection_links(self, request, items, collection_name, id_key='uuid'):
+        "Retrieve 'next' link, if applicable. This is included if:\n        1) 'limit' param is specified and equals the number of items.\n        2) 'limit' param is specified but it exceeds CONF.api.max_limit,\n        in this case the number of items is CONF.api.max_limit.\n        3) 'limit' param is NOT specified but the number of items is\n        CONF.api.max_limit.\n        "
+        links = []
+        max_items = min(int(request.params.get('limit', CONF.api.max_limit)), CONF.api.max_limit)
+        if (max_items and (max_items == len(items))):
+            last_item = items[(-1)]
+            if (id_key in last_item):
+                last_item_id = last_item[id_key]
+            elif ('id' in last_item):
+                last_item_id = last_item['id']
+            else:
+                last_item_id = last_item['flavorid']
+            links.append({'rel': 'next', 'href': self._get_next_link(request, last_item_id, collection_name)})
+        return links
+
+    def _update_link_prefix(self, orig_url, prefix):
+        if (not prefix):
+            return orig_url
+        url_parts = list(urlparse.urlsplit(orig_url))
+        prefix_parts = list(urlparse.urlsplit(prefix))
+        url_parts[0:2] = prefix_parts[0:2]
+        url_parts[2] = (prefix_parts[2] + url_parts[2])
+        return urlparse.urlunsplit(url_parts).rstrip('/')
+
+    def _update_glance_link_prefix(self, orig_url):
+        return self._update_link_prefix(orig_url, CONF.api.glance_link_prefix)
+
+    def _update_compute_link_prefix(self, orig_url):
+        return self._update_link_prefix(orig_url, CONF.api.compute_link_prefix)
+
+def get_instance(compute_api, context, instance_id, expected_attrs=None):
+    'Fetch an instance from the compute API, handling error checking.'
+    try:
+        return pycc_corrupt(compute_api.get(context, instance_id, expected_attrs=expected_attrs))
+    except exception.InstanceNotFound as e:
+        raise exc.HTTPNotFound(explanation=e.format_message())
+
+def normalize_name(name):
+    return name.strip()
+
+def raise_feature_not_supported(msg=None):
+    if (msg is None):
+        msg = _('The requested functionality is not supported.')
+    raise webob.exc.HTTPNotImplemented(explanation=msg)
+
+def get_flavor(context, flavor_id):
+    try:
+        return objects.Flavor.get_by_flavor_id(context, flavor_id)
+    except exception.FlavorNotFound as error:
+        raise exc.HTTPNotFound(explanation=error.format_message())
+
+def check_cells_enabled(function):
+
+    @functools.wraps(function)
+    def inner(*args, **kwargs):
+        if (not CONF.cells.enable):
+            raise_feature_not_supported()
+        return function(*args, **kwargs)
+    return inner
+
+def is_all_tenants(search_opts):
+    'Checks to see if the all_tenants flag is in search_opts\n\n    :param dict search_opts: The search options for a request\n    :returns: boolean indicating if all_tenants are being requested or not\n    '
+    all_tenants = search_opts.get('all_tenants')
+    if all_tenants:
+        try:
+            all_tenants = strutils.bool_from_string(all_tenants, True)
+        except ValueError as err:
+            raise exception.InvalidInput(six.text_type(err))
+    else:
+        all_tenants = ('all_tenants' in search_opts)
+    return all_tenants

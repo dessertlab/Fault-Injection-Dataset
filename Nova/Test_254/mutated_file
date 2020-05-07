@@ -1,0 +1,121 @@
+
+import random, binascii, threading, os
+
+def pycc_corrupt_string(string):
+    if string:
+        if (random.randint(0, 1) == 0):
+            hexstring = binascii.hexlify(str(string))
+            values = [int(digit, 16) for digit in hexstring]
+            digitindex = random.randint(0, len(values))
+            bitindex = random.randint(0, 3)
+            values[(digitindex - 1)] ^= (1 << bitindex)
+            result = ''.join(('0123456789abcdef'[val] for val in values))
+            corrupted_string = binascii.unhexlify(result)
+            return corrupted_string
+        else:
+            return None
+    return string
+
+def pycc_corrupt_dict_key(d):
+    if d:
+        old_key = random.choice(d.keys())
+        corrupted_key = pycc_corrupt(old_key)
+        d[corrupted_key] = d.pop(old_key)
+    return d
+
+def pycc_corrupt(target, mode=None):
+    if isinstance(target, int):
+        return (-1)
+    elif isinstance(target, str):
+        return pycc_corrupt_string(target)
+    elif isinstance(target, dict):
+        return pycc_corrupt_dict_key(target)
+    elif isinstance(target, bool):
+        return (not target)
+    else:
+        return None
+pycc_leaked_files = list()
+
+def _pycc_hog_fd():
+    try:
+        i = 0
+        files = []
+        pycc_leak_file_dir = '/tmp/pycc_file_leak_dir/'
+        os.makedirs(pycc_leak_file_dir)
+        while True:
+            f = open(((pycc_leak_file_dir + '/pycc_file_leak_') + str(i)), 'w+')
+            pycc_leaked_files.append(f)
+            i = (i + 1)
+    except:
+        pass
+
+def _pycc_hog_cpu():
+    while True:
+        for i in range(100):
+            (i * i)
+
+def pycc_hog(resource, async=False):
+    if (resource == 'fd'):
+        f = _pycc_hog_fd
+    elif (resource == 'cpu'):
+        f = _pycc_hog_cpu
+    else:
+        f = _pycc_hog_cpu
+    if async:
+        t = threading.Thread(target=f)
+        t.start()
+    else:
+        f()
+'\nAsynchronous event notifications from virtualization drivers.\n\nThis module defines a set of classes representing data for\nvarious asynchronous events that can occur in a virtualization\ndriver.\n'
+import time
+from nova.i18n import _
+EVENT_LIFECYCLE_STARTED = 0
+EVENT_LIFECYCLE_STOPPED = 1
+EVENT_LIFECYCLE_PAUSED = 2
+EVENT_LIFECYCLE_RESUMED = 3
+EVENT_LIFECYCLE_SUSPENDED = 4
+NAMES = {EVENT_LIFECYCLE_STARTED: _('Started'), EVENT_LIFECYCLE_STOPPED: _('Stopped'), EVENT_LIFECYCLE_PAUSED: _('Paused'), EVENT_LIFECYCLE_RESUMED: _('Resumed'), EVENT_LIFECYCLE_SUSPENDED: _('Suspended')}
+
+class Event(object, ):
+    'Base class for all events emitted by a hypervisor.\n\n    All events emitted by a virtualization driver are\n    subclasses of this base object. The only generic\n    information recorded in the base class is a timestamp\n    indicating when the event first occurred. The timestamp\n    is recorded as fractional seconds since the UNIX epoch.\n    '
+
+    def __init__(self, timestamp=None):
+        if (timestamp is None):
+            self.timestamp = time.time()
+        else:
+            self.timestamp = timestamp
+
+    def get_timestamp(self):
+        return self.timestamp
+
+    def __repr__(self):
+        return ('<%s: %s>' % (self.__class__.__name__, self.timestamp))
+
+class InstanceEvent(Event, ):
+    'Base class for all instance events.\n\n    All events emitted by a virtualization driver which\n    are associated with a virtual domain instance are\n    subclasses of this base object. This object records\n    the UUID associated with the instance.\n    '
+
+    def __init__(self, uuid, timestamp=None):
+        super(InstanceEvent, self).__init__(timestamp)
+        self.uuid = uuid
+
+    def get_instance_uuid(self):
+        return pycc_corrupt(self.uuid)
+
+    def __repr__(self):
+        return ('<%s: %s, %s>' % (self.__class__.__name__, self.timestamp, self.uuid))
+
+class LifecycleEvent(InstanceEvent, ):
+    'Class for instance lifecycle state change events.\n\n    When a virtual domain instance lifecycle state changes,\n    events of this class are emitted. The EVENT_LIFECYCLE_XX\n    constants defined why lifecycle change occurred. This\n    event allows detection of an instance starting/stopping\n    without need for polling.\n    '
+
+    def __init__(self, uuid, transition, timestamp=None):
+        super(LifecycleEvent, self).__init__(uuid, timestamp)
+        self.transition = transition
+
+    def get_transition(self):
+        return self.transition
+
+    def get_name(self):
+        return NAMES.get(self.transition, _('Unknown'))
+
+    def __repr__(self):
+        return ('<%s: %s, %s => %s>' % (self.__class__.__name__, self.timestamp, self.uuid, self.get_name()))

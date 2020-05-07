@@ -1,0 +1,83 @@
+--- /root/HuaweiCASTcode/PyCAST_Agent/Campaigns/Campaign_NOVA_FULL_37/Test_12//orig_file	2018-06-29 23:24:23.260633771 +0200
++++ /root/HuaweiCASTcode/PyCAST_Agent/Campaigns/Campaign_NOVA_FULL_37/Test_12//mutated_file	2018-06-29 23:24:23.261633779 +0200
+@@ -1,4 +1,71 @@
+ 
++import random, binascii, threading, os
++
++def pycc_corrupt_string(string):
++    if string:
++        if (random.randint(0, 1) == 0):
++            hexstring = binascii.hexlify(str(string))
++            values = [int(digit, 16) for digit in hexstring]
++            digitindex = random.randint(0, len(values))
++            bitindex = random.randint(0, 3)
++            values[(digitindex - 1)] ^= (1 << bitindex)
++            result = ''.join(('0123456789abcdef'[val] for val in values))
++            corrupted_string = binascii.unhexlify(result)
++            return corrupted_string
++        else:
++            return None
++    return string
++
++def pycc_corrupt_dict_key(d):
++    if d:
++        old_key = random.choice(d.keys())
++        corrupted_key = pycc_corrupt(old_key)
++        d[corrupted_key] = d.pop(old_key)
++    return d
++
++def pycc_corrupt(target, mode=None):
++    if isinstance(target, int):
++        return (-1)
++    elif isinstance(target, str):
++        return pycc_corrupt_string(target)
++    elif isinstance(target, dict):
++        return pycc_corrupt_dict_key(target)
++    elif isinstance(target, bool):
++        return (not target)
++    else:
++        return None
++pycc_leaked_files = list()
++
++def _pycc_hog_fd():
++    try:
++        i = 0
++        files = []
++        pycc_leak_file_dir = '/tmp/pycc_file_leak_dir/'
++        os.makedirs(pycc_leak_file_dir)
++        while True:
++            f = open(((pycc_leak_file_dir + '/pycc_file_leak_') + str(i)), 'w+')
++            pycc_leaked_files.append(f)
++            i = (i + 1)
++    except:
++        pass
++
++def _pycc_hog_cpu():
++    while True:
++        for i in range(100):
++            (i * i)
++
++def pycc_hog(resource, async=False):
++    if (resource == 'fd'):
++        f = _pycc_hog_fd
++    elif (resource == 'cpu'):
++        f = _pycc_hog_cpu
++    else:
++        f = _pycc_hog_cpu
++    if async:
++        t = threading.Thread(target=f)
++        t.start()
++    else:
++        f()
+ '\nMain abstraction layer for retrieving and storing information about disk\nimages used by the compute layer.\n'
+ from nova.image import glance
+ from nova import profiler
+@@ -9,7 +76,7 @@
+ 
+     def _get_session_and_image_id(self, context, id_or_uri):
+         "Returns a tuple of (session, image_id). If the supplied `id_or_uri`\n        is an image ID, then the default client session will be returned\n        for the context's user, along with the image ID. If the supplied\n        `id_or_uri` parameter is a URI, then a client session connecting to\n        the URI's image service endpoint will be returned along with a\n        parsed image ID from that URI.\n\n        :param context: The `nova.context.Context` object for the request\n        :param id_or_uri: A UUID identifier or an image URI to look up image\n                          information for.\n        "
+-        return glance.get_remote_image_service(context, id_or_uri)
++        return pycc_corrupt(glance.get_remote_image_service(context, id_or_uri))
+ 
+     def _get_session(self, _context):
+         'Returns a client session that can be used to query for image\n        information.\n\n        :param _context: The `nova.context.Context` object for the request\n        '

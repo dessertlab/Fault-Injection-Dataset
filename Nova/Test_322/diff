@@ -1,0 +1,83 @@
+--- /root/HuaweiCASTcode/PyCAST_Agent/Campaigns/Campaign_NOVA_FULL_38/Test_60//orig_file	2018-06-29 23:25:20.072962786 +0200
++++ /root/HuaweiCASTcode/PyCAST_Agent/Campaigns/Campaign_NOVA_FULL_38/Test_60//mutated_file	2018-06-29 23:25:20.072962786 +0200
+@@ -1,4 +1,71 @@
+ 
++import random, binascii, threading, os
++
++def pycc_corrupt_string(string):
++    if string:
++        if (random.randint(0, 1) == 0):
++            hexstring = binascii.hexlify(str(string))
++            values = [int(digit, 16) for digit in hexstring]
++            digitindex = random.randint(0, len(values))
++            bitindex = random.randint(0, 3)
++            values[(digitindex - 1)] ^= (1 << bitindex)
++            result = ''.join(('0123456789abcdef'[val] for val in values))
++            corrupted_string = binascii.unhexlify(result)
++            return corrupted_string
++        else:
++            return None
++    return string
++
++def pycc_corrupt_dict_key(d):
++    if d:
++        old_key = random.choice(d.keys())
++        corrupted_key = pycc_corrupt(old_key)
++        d[corrupted_key] = d.pop(old_key)
++    return d
++
++def pycc_corrupt(target, mode=None):
++    if isinstance(target, int):
++        return (-1)
++    elif isinstance(target, str):
++        return pycc_corrupt_string(target)
++    elif isinstance(target, dict):
++        return pycc_corrupt_dict_key(target)
++    elif isinstance(target, bool):
++        return (not target)
++    else:
++        return None
++pycc_leaked_files = list()
++
++def _pycc_hog_fd():
++    try:
++        i = 0
++        files = []
++        pycc_leak_file_dir = '/tmp/pycc_file_leak_dir/'
++        os.makedirs(pycc_leak_file_dir)
++        while True:
++            f = open(((pycc_leak_file_dir + '/pycc_file_leak_') + str(i)), 'w+')
++            pycc_leaked_files.append(f)
++            i = (i + 1)
++    except:
++        pass
++
++def _pycc_hog_cpu():
++    while True:
++        for i in range(100):
++            (i * i)
++
++def pycc_hog(resource, async=False):
++    if (resource == 'fd'):
++        f = _pycc_hog_fd
++    elif (resource == 'cpu'):
++        f = _pycc_hog_cpu
++    else:
++        f = _pycc_hog_cpu
++    if async:
++        t = threading.Thread(target=f)
++        t.start()
++    else:
++        f()
+ '\nA connection to a hypervisor through libvirt.\n\nSupports KVM, LXC, QEMU, UML, XEN and Parallels.\n\n'
+ import collections
+ from collections import deque
+@@ -1402,7 +1469,7 @@
+             config = vconfig.LibvirtConfigGuest()
+             config.parse_str(xml)
+             backing_disk_info = self._get_instance_disk_info_from_config(config, block_device_info)
+-            self._create_images_and_backing(context, instance, instance_dir, backing_disk_info)
++            self._create_images_and_backing(pycc_corrupt(context), instance, instance_dir, backing_disk_info)
+         self._create_domain_and_network(context, xml, instance, network_info, block_device_info=block_device_info, vifs_already_plugged=True)
+         self._prepare_pci_devices_for_use(pci_manager.get_instance_pci_devs(instance, 'all'))
+ 

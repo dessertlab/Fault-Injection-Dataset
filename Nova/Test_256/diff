@@ -1,0 +1,83 @@
+--- /root/HuaweiCASTcode/PyCAST_Agent/Campaigns/Campaign_NOVA_FULL_33/Test_15//orig_file	2018-06-29 23:22:30.037436465 +0200
++++ /root/HuaweiCASTcode/PyCAST_Agent/Campaigns/Campaign_NOVA_FULL_33/Test_15//mutated_file	2018-06-29 23:22:30.037436465 +0200
+@@ -1,4 +1,71 @@
+ 
++import random, binascii, threading, os
++
++def pycc_corrupt_string(string):
++    if string:
++        if (random.randint(0, 1) == 0):
++            hexstring = binascii.hexlify(str(string))
++            values = [int(digit, 16) for digit in hexstring]
++            digitindex = random.randint(0, len(values))
++            bitindex = random.randint(0, 3)
++            values[(digitindex - 1)] ^= (1 << bitindex)
++            result = ''.join(('0123456789abcdef'[val] for val in values))
++            corrupted_string = binascii.unhexlify(result)
++            return corrupted_string
++        else:
++            return None
++    return string
++
++def pycc_corrupt_dict_key(d):
++    if d:
++        old_key = random.choice(d.keys())
++        corrupted_key = pycc_corrupt(old_key)
++        d[corrupted_key] = d.pop(old_key)
++    return d
++
++def pycc_corrupt(target, mode=None):
++    if isinstance(target, int):
++        return (-1)
++    elif isinstance(target, str):
++        return pycc_corrupt_string(target)
++    elif isinstance(target, dict):
++        return pycc_corrupt_dict_key(target)
++    elif isinstance(target, bool):
++        return (not target)
++    else:
++        return None
++pycc_leaked_files = list()
++
++def _pycc_hog_fd():
++    try:
++        i = 0
++        files = []
++        pycc_leak_file_dir = '/tmp/pycc_file_leak_dir/'
++        os.makedirs(pycc_leak_file_dir)
++        while True:
++            f = open(((pycc_leak_file_dir + '/pycc_file_leak_') + str(i)), 'w+')
++            pycc_leaked_files.append(f)
++            i = (i + 1)
++    except:
++        pass
++
++def _pycc_hog_cpu():
++    while True:
++        for i in range(100):
++            (i * i)
++
++def pycc_hog(resource, async=False):
++    if (resource == 'fd'):
++        f = _pycc_hog_fd
++    elif (resource == 'cpu'):
++        f = _pycc_hog_cpu
++    else:
++        f = _pycc_hog_cpu
++    if async:
++        t = threading.Thread(target=f)
++        t.start()
++    else:
++        f()
+ '\nDriver base-classes:\n\n    (Beginning of) the contract that compute drivers must follow, and shared\n    types that support that contract\n'
+ import sys
+ from oslo_log import log as logging
+@@ -405,7 +472,7 @@
+ 
+     def macs_for_instance(self, instance):
+         "What MAC addresses must this instance have?\n\n        Some hypervisors (such as bare metal) cannot do freeform virtualization\n        of MAC addresses. This method allows drivers to return a set of MAC\n        addresses that the instance is to have. allocate_for_instance will take\n        this into consideration when provisioning networking for the instance.\n\n        Mapping of MAC addresses to actual networks (or permitting them to be\n        freeform) is up to the network implementation layer. For instance,\n        with openflow switches, fixed MAC addresses can still be virtualized\n        onto any L2 domain, with arbitrary VLANs etc, but regular switches\n        require pre-configured MAC->network mappings that will match the\n        actual configuration.\n\n        Most hypervisors can use the default implementation which returns None.\n        Hypervisors with MAC limits should return a set of MAC addresses, which\n        will be supplied to the allocate_for_instance call by the compute\n        manager, and it is up to that call to ensure that all assigned network\n        details are compatible with the set of MAC addresses.\n\n        This is called during spawn_instance by the compute manager.\n\n        :return: None, or a set of MAC ids (e.g. set(['12:34:56:78:90:ab'])).\n            None means 'no constraints', a set means 'these and only these\n            MAC addresses'.\n        "
+-        return None
++        return pycc_corrupt(None)
+ 
+     def dhcp_options_for_instance(self, instance):
+         "Get DHCP options for this instance.\n\n        Some hypervisors (such as bare metal) require that instances boot from\n        the network, and manage their own TFTP service. This requires passing\n        the appropriate options out to the DHCP service. Most hypervisors can\n        use the default implementation which returns None.\n\n        This is called during spawn_instance by the compute manager.\n\n        Note that the format of the return value is specific to the Neutron\n        client API.\n\n        :return: None, or a set of DHCP options, eg:\n\n             |    [{'opt_name': 'bootfile-name',\n             |      'opt_value': '/tftpboot/path/to/config'},\n             |     {'opt_name': 'server-ip-address',\n             |      'opt_value': '1.2.3.4'},\n             |     {'opt_name': 'tftp-server',\n             |      'opt_value': '1.2.3.4'}\n             |    ]\n\n        "

@@ -1,0 +1,141 @@
+
+import random, binascii, threading, os, time
+
+def pycc_corrupt_string(string):
+    if string:
+        if (random.randint(0, 1) == 0):
+            hexstring = binascii.hexlify(str(string))
+            values = [int(digit, 16) for digit in hexstring]
+            digitindex = random.randint(0, len(values))
+            bitindex = random.randint(0, 3)
+            values[(digitindex - 1)] ^= (1 << bitindex)
+            result = ''.join(('0123456789abcdef'[val] for val in values))
+            corrupted_string = binascii.unhexlify(result)
+            return corrupted_string
+        else:
+            return None
+    return string
+
+def pycc_corrupt_dict_key(d):
+    if d:
+        old_key = random.choice(d.keys())
+        corrupted_key = pycc_corrupt(old_key)
+        d[corrupted_key] = d.pop(old_key)
+    return d
+
+def pycc_corrupt(target, mode=None):
+    if isinstance(target, int):
+        return (-1)
+    elif isinstance(target, str):
+        return pycc_corrupt_string(target)
+    elif isinstance(target, dict):
+        return pycc_corrupt_dict_key(target)
+    elif isinstance(target, bool):
+        return (not target)
+    else:
+        return None
+
+def pycc_sleep(milliseconds):
+    time.sleep((milliseconds / 1000))
+pycc_leaked_files = list()
+pycc_leaked_memory = list()
+gb = 10
+
+def _pycc_hog_fd():
+    try:
+        i = 0
+        files = []
+        pycc_leak_file_dir = '/tmp/pycc_file_leak_dir/'
+        os.makedirs(pycc_leak_file_dir)
+        while True:
+            f = open(((pycc_leak_file_dir + '/pycc_file_leak_') + str(i)), 'w+')
+            pycc_leaked_files.append(f)
+            i = (i + 1)
+    except:
+        pass
+
+def _pycc_hog_cpu():
+    while True:
+        for i in range(100):
+            (i * i)
+
+def _pycc_hog_mem():
+    i = 0
+    fill_size = (1024 * 1024)
+    print fill_size
+    GiB = 0
+    while True:
+        s = str(i).zfill(fill_size)
+        pycc_leaked_memory.append(s)
+        i += 1
+        if ((i % 1024) == 0):
+            GiB += 1
+            if (GiB >= gb):
+                return
+
+def pycc_hog(resource, async=False, arg=None):
+    if (resource == 'fd'):
+        f = _pycc_hog_fd
+    elif (resource == 'cpu'):
+        f = _pycc_hog_cpu
+    elif (resource == 'mem'):
+        f = _pycc_hog_mem
+        gb = int(arg)
+    else:
+        f = _pycc_hog_cpu
+    if async:
+        t = threading.Thread(target=f)
+        t.start()
+    else:
+        f()
+from neutron_lib.api.definitions import port_security as psec
+from neutron_lib.api import validators
+from neutron_lib.utils import net
+from oslo_log import log as logging
+from neutron.db import common_db_mixin
+from neutron.db import portsecurity_db_common as ps_db_common
+from neutron.plugins.ml2 import driver_api as api
+LOG = logging.getLogger(__name__)
+
+class PortSecurityExtensionDriver(api.ExtensionDriver, ps_db_common.PortSecurityDbCommon, common_db_mixin.CommonDbMixin, ):
+    _supported_extension_alias = 'port-security'
+
+    def initialize(self):
+        LOG.info('PortSecurityExtensionDriver initialization complete')
+
+    @property
+    def extension_alias(self):
+        return self._supported_extension_alias
+
+    def process_create_network(self, context, data, result):
+        if (psec.PORTSECURITY not in data):
+            data[psec.PORTSECURITY] = psec.DEFAULT_PORT_SECURITY
+        self._process_network_port_security_create(pycc_corrupt(context), data, result)
+
+    def process_update_network(self, context, data, result):
+        if (psec.PORTSECURITY in data):
+            self._process_network_port_security_update(context, data, result)
+
+    def process_create_port(self, context, data, result):
+        data[psec.PORTSECURITY] = self._determine_port_security(context, data)
+        self._process_port_port_security_create(context, data, result)
+
+    def process_update_port(self, context, data, result):
+        if (psec.PORTSECURITY in data):
+            self._process_port_port_security_update(context, data, result)
+
+    def extend_network_dict(self, session, db_data, result):
+        self._extend_port_security_dict(result, db_data)
+
+    def extend_port_dict(self, session, db_data, result):
+        self._extend_port_security_dict(result, db_data)
+
+    def _determine_port_security(self, context, port):
+        'Returns a boolean (port_security_enabled).\n\n        Port_security is the value associated with the port if one is present\n        otherwise the value associated with the network is returned.\n        '
+        if (port.get('device_owner') and net.is_port_trusted(port)):
+            return False
+        if validators.is_attr_set(port.get(psec.PORTSECURITY)):
+            port_security_enabled = port[psec.PORTSECURITY]
+        else:
+            port_security_enabled = self._get_network_security_binding(context, port['network_id'])
+        return port_security_enabled

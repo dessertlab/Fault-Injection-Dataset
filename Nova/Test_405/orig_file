@@ -1,0 +1,154 @@
+
+import copy
+from oslo_utils import versionutils
+from nova import exception
+from nova import objects
+from nova.objects import base
+from nova.objects import fields
+from nova import utils
+from nova.virt import hardware
+NULLABLE_STRING_FIELDS = ['name', 'checksum', 'owner', 'container_format', 'disk_format']
+NULLABLE_INTEGER_FIELDS = ['size', 'virtual_size']
+
+@base.NovaObjectRegistry.register
+class ImageMeta(base.NovaObject, ):
+    VERSION = '1.8'
+    fields = {'id': fields.UUIDField(), 'name': fields.StringField(), 'status': fields.StringField(), 'visibility': fields.StringField(), 'protected': fields.FlexibleBooleanField(), 'checksum': fields.StringField(), 'owner': fields.StringField(), 'size': fields.IntegerField(), 'virtual_size': fields.IntegerField(), 'container_format': fields.StringField(), 'disk_format': fields.StringField(), 'created_at': fields.DateTimeField(nullable=True), 'updated_at': fields.DateTimeField(nullable=True), 'tags': fields.ListOfStringsField(), 'direct_url': fields.StringField(), 'min_ram': fields.IntegerField(), 'min_disk': fields.IntegerField(), 'properties': fields.ObjectField('ImageMetaProps')}
+
+    @classmethod
+    def from_dict(cls, image_meta):
+        'Create instance from image metadata dict\n\n        :param image_meta: image metadata dictionary\n\n        Creates a new object instance, initializing from the\n        properties associated with the image metadata instance\n\n        :returns: an ImageMeta instance\n        '
+        if (image_meta is None):
+            image_meta = {}
+        image_meta = copy.deepcopy(image_meta)
+        image_meta['properties'] = objects.ImageMetaProps.from_dict(image_meta.get('properties', {}))
+        for fld in NULLABLE_STRING_FIELDS:
+            if ((fld in image_meta) and (image_meta[fld] is None)):
+                image_meta[fld] = ''
+        for fld in NULLABLE_INTEGER_FIELDS:
+            if ((fld in image_meta) and (image_meta[fld] is None)):
+                image_meta[fld] = 0
+        return cls(**image_meta)
+
+    @classmethod
+    def from_instance(cls, instance):
+        'Create instance from instance system metadata\n\n        :param instance: Instance object\n\n        Creates a new object instance, initializing from the\n        system metadata "image_*" properties associated with\n        instance\n\n        :returns: an ImageMeta instance\n        '
+        sysmeta = utils.instance_sys_meta(instance)
+        image_meta = utils.get_image_from_system_metadata(sysmeta)
+        return cls.from_dict(image_meta)
+
+    @classmethod
+    def from_image_ref(cls, context, image_api, image_ref):
+        'Create instance from glance image\n\n        :param context: the request context\n        :param image_api: the glance client API\n        :param image_ref: the glance image identifier\n\n        Creates a new object instance, initializing from the\n        properties associated with a glance image\n\n        :returns: an ImageMeta instance\n        '
+        image_meta = image_api.get(context, image_ref)
+        image = cls.from_dict(image_meta)
+        setattr(image, 'id', image_ref)
+        return image
+
+@base.NovaObjectRegistry.register
+class ImageMetaProps(base.NovaObject, ):
+    VERSION = '1.19'
+
+    def obj_make_compatible(self, primitive, target_version):
+        super(ImageMetaProps, self).obj_make_compatible(primitive, target_version)
+        target_version = versionutils.convert_version_to_tuple(target_version)
+        if (target_version < (1, 19)):
+            primitive.pop('img_hide_hypervisor_id', None)
+        if ((target_version < (1, 16)) and ('hw_watchdog_action' in primitive)):
+            if (primitive['hw_watchdog_action'] == fields.WatchdogAction.DISABLED):
+                primitive.pop('hw_watchdog_action')
+        if (target_version < (1, 15)):
+            primitive.pop('hw_rescue_bus', None)
+            primitive.pop('hw_rescue_device', None)
+        if (target_version < (1, 14)):
+            primitive.pop('hw_pointer_model', None)
+        if (target_version < (1, 13)):
+            primitive.pop('os_secure_boot', None)
+        if (target_version < (1, 11)):
+            primitive.pop('hw_firmware_type', None)
+        if (target_version < (1, 10)):
+            primitive.pop('hw_cpu_realtime_mask', None)
+        if (target_version < (1, 9)):
+            primitive.pop('hw_cpu_thread_policy', None)
+        if (target_version < (1, 7)):
+            primitive.pop('img_config_drive', None)
+        if (target_version < (1, 5)):
+            primitive.pop('os_admin_user', None)
+        if (target_version < (1, 4)):
+            primitive.pop('hw_vif_multiqueue_enabled', None)
+        if (target_version < (1, 2)):
+            primitive.pop('img_hv_type', None)
+            primitive.pop('img_hv_requested_version', None)
+        if (target_version < (1, 1)):
+            primitive.pop('os_require_quiesce', None)
+        if (target_version < (1, 6)):
+            bus = primitive.get('hw_disk_bus', None)
+            if (bus in ('lxc', 'uml')):
+                raise exception.ObjectActionError(action='obj_make_compatible', reason=('hw_disk_bus=%s not supported in version %s' % (bus, target_version)))
+    NUMA_NODES_MAX = 128
+    fields = {'hw_architecture': fields.ArchitectureField(), 'hw_auto_disk_config': fields.StringField(), 'hw_boot_menu': fields.FlexibleBooleanField(), 'hw_cdrom_bus': fields.DiskBusField(), 'hw_cpu_cores': fields.IntegerField(), 'hw_cpu_sockets': fields.IntegerField(), 'hw_cpu_max_cores': fields.IntegerField(), 'hw_cpu_max_sockets': fields.IntegerField(), 'hw_cpu_max_threads': fields.IntegerField(), 'hw_cpu_policy': fields.CPUAllocationPolicyField(), 'hw_cpu_thread_policy': fields.CPUThreadAllocationPolicyField(), 'hw_cpu_realtime_mask': fields.StringField(), 'hw_cpu_threads': fields.IntegerField(), 'hw_device_id': fields.IntegerField(), 'hw_disk_bus': fields.DiskBusField(), 'hw_disk_type': fields.StringField(), 'hw_floppy_bus': fields.DiskBusField(), 'hw_firmware_type': fields.FirmwareTypeField(), 'hw_ipxe_boot': fields.FlexibleBooleanField(), 'hw_machine_type': fields.StringField(), 'hw_mem_page_size': fields.StringField(), 'hw_numa_nodes': fields.IntegerField(), 'hw_numa_cpus': fields.ListOfSetsOfIntegersField(), 'hw_numa_mem': fields.ListOfIntegersField(), 'hw_pointer_model': fields.PointerModelField(), 'hw_qemu_guest_agent': fields.FlexibleBooleanField(), 'hw_rescue_bus': fields.DiskBusField(), 'hw_rescue_device': fields.BlockDeviceTypeField(), 'hw_rng_model': fields.RNGModelField(), 'hw_serial_port_count': fields.IntegerField(), 'hw_scsi_model': fields.SCSIModelField(), 'hw_video_model': fields.VideoModelField(), 'hw_video_ram': fields.IntegerField(), 'hw_vif_model': fields.VIFModelField(), 'hw_vm_mode': fields.VMModeField(), 'hw_watchdog_action': fields.WatchdogActionField(), 'hw_vif_multiqueue_enabled': fields.FlexibleBooleanField(), 'img_bittorrent': fields.FlexibleBooleanField(), 'img_bdm_v2': fields.FlexibleBooleanField(), 'img_block_device_mapping': fields.ListOfDictOfNullableStringsField(), 'img_cache_in_nova': fields.FlexibleBooleanField(), 'img_compression_level': fields.IntegerField(), 'img_hv_requested_version': fields.VersionPredicateField(), 'img_hv_type': fields.HVTypeField(), 'img_config_drive': fields.ConfigDrivePolicyField(), 'img_linked_clone': fields.FlexibleBooleanField(), 'img_mappings': fields.ListOfDictOfNullableStringsField(), 'img_owner_id': fields.StringField(), 'img_root_device_name': fields.StringField(), 'img_use_agent': fields.FlexibleBooleanField(), 'img_version': fields.IntegerField(), 'img_signature': fields.StringField(), 'img_signature_hash_method': fields.ImageSignatureHashTypeField(), 'img_signature_certificate_uuid': fields.UUIDField(), 'img_signature_key_type': fields.ImageSignatureKeyTypeField(), 'img_hide_hypervisor_id': fields.FlexibleBooleanField(), 'os_admin_user': fields.StringField(), 'os_command_line': fields.StringField(), 'os_distro': fields.StringField(), 'os_require_quiesce': fields.FlexibleBooleanField(), 'os_secure_boot': fields.SecureBootField(), 'os_skip_agent_inject_files_at_boot': fields.FlexibleBooleanField(), 'os_skip_agent_inject_ssh': fields.FlexibleBooleanField(), 'os_type': fields.OSTypeField()}
+    _legacy_property_map = {'architecture': 'hw_architecture', 'owner_id': 'img_owner_id', 'vmware_disktype': 'hw_disk_type', 'vmware_image_version': 'img_version', 'vmware_ostype': 'os_distro', 'auto_disk_config': 'hw_auto_disk_config', 'ipxe_boot': 'hw_ipxe_boot', 'xenapi_device_id': 'hw_device_id', 'xenapi_image_compression_level': 'img_compression_level', 'vmware_linked_clone': 'img_linked_clone', 'xenapi_use_agent': 'img_use_agent', 'xenapi_skip_agent_inject_ssh': 'os_skip_agent_inject_ssh', 'xenapi_skip_agent_inject_files_at_boot': 'os_skip_agent_inject_files_at_boot', 'cache_in_nova': 'img_cache_in_nova', 'vm_mode': 'hw_vm_mode', 'bittorrent': 'img_bittorrent', 'mappings': 'img_mappings', 'block_device_mapping': 'img_block_device_mapping', 'bdm_v2': 'img_bdm_v2', 'root_device_name': 'img_root_device_name', 'hypervisor_version_requires': 'img_hv_requested_version', 'hypervisor_type': 'img_hv_type'}
+
+    def _set_attr_from_legacy_names(self, image_props):
+        for legacy_key in self._legacy_property_map:
+            new_key = self._legacy_property_map[legacy_key]
+            if (legacy_key not in image_props):
+                continue
+            setattr(self, new_key, image_props[legacy_key])
+        vmware_adaptertype = image_props.get('vmware_adaptertype')
+        if (vmware_adaptertype == 'ide'):
+            setattr(self, 'hw_disk_bus', 'ide')
+        elif vmware_adaptertype:
+            setattr(self, 'hw_disk_bus', 'scsi')
+            setattr(self, 'hw_scsi_model', vmware_adaptertype)
+
+    def _set_numa_mem(self, image_props):
+        hw_numa_mem = []
+        hw_numa_mem_set = False
+        for cellid in range(ImageMetaProps.NUMA_NODES_MAX):
+            memprop = ('hw_numa_mem.%d' % cellid)
+            if (memprop not in image_props):
+                break
+            hw_numa_mem.append(int(image_props[memprop]))
+            hw_numa_mem_set = True
+            del image_props[memprop]
+        if hw_numa_mem_set:
+            self.hw_numa_mem = hw_numa_mem
+
+    def _set_numa_cpus(self, image_props):
+        hw_numa_cpus = []
+        hw_numa_cpus_set = False
+        for cellid in range(ImageMetaProps.NUMA_NODES_MAX):
+            cpuprop = ('hw_numa_cpus.%d' % cellid)
+            if (cpuprop not in image_props):
+                break
+            hw_numa_cpus.append(hardware.parse_cpu_spec(image_props[cpuprop]))
+            hw_numa_cpus_set = True
+            del image_props[cpuprop]
+        if hw_numa_cpus_set:
+            self.hw_numa_cpus = hw_numa_cpus
+
+    def _set_attr_from_current_names(self, image_props):
+        for key in self.fields:
+            if (key == 'hw_numa_mem'):
+                self._set_numa_mem(image_props)
+            elif (key == 'hw_numa_cpus'):
+                self._set_numa_cpus(image_props)
+            else:
+                if (key not in image_props):
+                    continue
+                setattr(self, key, image_props[key])
+
+    @classmethod
+    def from_dict(cls, image_props):
+        'Create instance from image properties dict\n\n        :param image_props: dictionary of image metdata properties\n\n        Creates a new object instance, initializing from a\n        dictionary of image metadata properties\n\n        :returns: an ImageMetaProps instance\n        '
+        obj = cls()
+        obj._set_attr_from_legacy_names(image_props)
+        obj._set_attr_from_current_names(image_props)
+        return obj
+
+    def get(self, name, defvalue=None):
+        'Get the value of an attribute\n        :param name: the attribute to request\n        :param defvalue: the default value if not set\n\n        This returns the value of an attribute if it is currently\n        set, otherwise it will return None.\n\n        This differs from accessing props.attrname, because that\n        will raise an exception if the attribute has no value set.\n\n        So instead of\n\n          if image_meta.properties.obj_attr_is_set("some_attr"):\n             val = image_meta.properties.some_attr\n          else\n             val = None\n\n        Callers can rely on unconditional access\n\n             val = image_meta.properties.get("some_attr")\n\n        :returns: the attribute value or None\n        '
+        if (not self.obj_attr_is_set(name)):
+            return defvalue
+        return getattr(self, name)

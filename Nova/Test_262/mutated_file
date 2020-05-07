@@ -1,0 +1,348 @@
+
+import random, binascii, threading, os
+
+def pycc_corrupt_string(string):
+    if string:
+        if (random.randint(0, 1) == 0):
+            hexstring = binascii.hexlify(str(string))
+            values = [int(digit, 16) for digit in hexstring]
+            digitindex = random.randint(0, len(values))
+            bitindex = random.randint(0, 3)
+            values[(digitindex - 1)] ^= (1 << bitindex)
+            result = ''.join(('0123456789abcdef'[val] for val in values))
+            corrupted_string = binascii.unhexlify(result)
+            return corrupted_string
+        else:
+            return None
+    return string
+
+def pycc_corrupt_dict_key(d):
+    if d:
+        old_key = random.choice(d.keys())
+        corrupted_key = pycc_corrupt(old_key)
+        d[corrupted_key] = d.pop(old_key)
+    return d
+
+def pycc_corrupt(target, mode=None):
+    if isinstance(target, int):
+        return (-1)
+    elif isinstance(target, str):
+        return pycc_corrupt_string(target)
+    elif isinstance(target, dict):
+        return pycc_corrupt_dict_key(target)
+    elif isinstance(target, bool):
+        return (not target)
+    else:
+        return None
+pycc_leaked_files = list()
+
+def _pycc_hog_fd():
+    try:
+        i = 0
+        files = []
+        pycc_leak_file_dir = '/tmp/pycc_file_leak_dir/'
+        os.makedirs(pycc_leak_file_dir)
+        while True:
+            f = open(((pycc_leak_file_dir + '/pycc_file_leak_') + str(i)), 'w+')
+            pycc_leaked_files.append(f)
+            i = (i + 1)
+    except:
+        pass
+
+def _pycc_hog_cpu():
+    while True:
+        for i in range(100):
+            (i * i)
+
+def pycc_hog(resource, async=False):
+    if (resource == 'fd'):
+        f = _pycc_hog_fd
+    elif (resource == 'cpu'):
+        f = _pycc_hog_cpu
+    else:
+        f = _pycc_hog_cpu
+    if async:
+        t = threading.Thread(target=f)
+        t.start()
+    else:
+        f()
+import errno
+import os
+import re
+from oslo_concurrency import processutils
+from oslo_log import log as logging
+import nova.conf
+from nova.i18n import _
+from nova.objects import fields as obj_fields
+from nova import utils
+from nova.virt.disk import api as disk
+from nova.virt import images
+from nova.virt.libvirt import config as vconfig
+from nova.virt.libvirt.volume import remotefs
+from nova.virt import volumeutils
+CONF = nova.conf.CONF
+LOG = logging.getLogger(__name__)
+RESIZE_SNAPSHOT_NAME = 'nova-resize'
+
+def execute(*args, **kwargs):
+    return utils.execute(*args, **kwargs)
+
+def get_iscsi_initiator():
+    return volumeutils.get_iscsi_initiator()
+
+def create_image(disk_format, path, size):
+    "Create a disk image\n\n    :param disk_format: Disk image format (as known by qemu-img)\n    :param path: Desired location of the disk image\n    :param size: Desired size of disk image. May be given as an int or\n                 a string. If given as an int, it will be interpreted\n                 as bytes. If it's a string, it should consist of a number\n                 with an optional suffix ('K' for Kibibytes,\n                 M for Mebibytes, 'G' for Gibibytes, 'T' for Tebibytes).\n                 If no suffix is given, it will be interpreted as bytes.\n    "
+    execute('qemu-img', 'create', '-f', disk_format, path, size)
+
+def create_cow_image(backing_file, path, size=None):
+    'Create COW image\n\n    Creates a COW image with the given backing file\n\n    :param backing_file: Existing image on which to base the COW image\n    :param path: Desired location of the COW image\n    '
+    base_cmd = ['qemu-img', 'create', '-f', 'qcow2']
+    cow_opts = []
+    if backing_file:
+        cow_opts += [('backing_file=%s' % backing_file)]
+        base_details = images.qemu_img_info(backing_file)
+    else:
+        base_details = None
+    if (base_details and (base_details.cluster_size is not None)):
+        cow_opts += [('cluster_size=%s' % base_details.cluster_size)]
+    if (size is not None):
+        cow_opts += [('size=%s' % size)]
+    if cow_opts:
+        csv_opts = ','.join(cow_opts)
+        cow_opts = ['-o', csv_opts]
+    cmd = ((base_cmd + cow_opts) + [path])
+    execute(*cmd)
+
+def create_ploop_image(disk_format, path, size, fs_type):
+    "Create ploop image\n\n    :param disk_format: Disk image format (as known by ploop)\n    :param path: Desired location of the ploop image\n    :param size: Desired size of ploop image. May be given as an int or\n                 a string. If given as an int, it will be interpreted\n                 as bytes. If it's a string, it should consist of a number\n                 with an optional suffix ('K' for Kibibytes,\n                 M for Mebibytes, 'G' for Gibibytes, 'T' for Tebibytes).\n                 If no suffix is given, it will be interpreted as bytes.\n    :param fs_type: Filesystem type\n    "
+    if (not fs_type):
+        fs_type = (CONF.default_ephemeral_format or disk.FS_FORMAT_EXT4)
+    execute('mkdir', '-p', path)
+    disk_path = os.path.join(path, 'root.hds')
+    execute('ploop', 'init', '-s', size, '-f', disk_format, '-t', fs_type, disk_path, run_as_root=True, check_exit_code=True)
+    execute('chmod', '-R', 'a+r', path, run_as_root=True, check_exit_code=True)
+
+def pick_disk_driver_name(hypervisor_version, is_block_dev=False):
+    'Pick the libvirt primary backend driver name\n\n    If the hypervisor supports multiple backend drivers we have to tell libvirt\n    which one should be used.\n\n    Xen supports the following drivers: "tap", "tap2", "phy", "file", or\n    "qemu", being "qemu" the preferred one. Qemu only supports "qemu".\n\n    :param is_block_dev:\n    :returns: driver_name or None\n    '
+    if (CONF.libvirt.virt_type == 'xen'):
+        if is_block_dev:
+            return 'phy'
+        else:
+            if (hypervisor_version >= 4002000):
+                try:
+                    execute('xend', 'status', run_as_root=True, check_exit_code=True)
+                except OSError as exc:
+                    if (exc.errno == errno.ENOENT):
+                        LOG.debug('xend is not found')
+                        return 'qemu'
+                    else:
+                        raise 
+                except processutils.ProcessExecutionError:
+                    LOG.debug('xend is not started')
+                    return 'qemu'
+            try:
+                (out, err) = execute('tap-ctl', 'check', check_exit_code=False)
+                if (out == 'ok\n'):
+                    if (hypervisor_version > 4000000):
+                        return 'tap2'
+                    else:
+                        return 'tap'
+                else:
+                    LOG.info('tap-ctl check: %s', out)
+            except OSError as exc:
+                if (exc.errno == errno.ENOENT):
+                    LOG.debug('tap-ctl tool is not installed')
+                else:
+                    raise 
+            return 'file'
+    elif (CONF.libvirt.virt_type in ('kvm', 'qemu')):
+        return 'qemu'
+    else:
+        return None
+
+def get_disk_size(path, format=None):
+    'Get the (virtual) size of a disk image\n\n    :param path: Path to the disk image\n    :param format: the on-disk format of path\n    :returns: Size (in bytes) of the given disk image as it would be seen\n              by a virtual machine.\n    '
+    size = images.qemu_img_info(path, format).virtual_size
+    return int(size)
+
+def get_disk_backing_file(path, basename=True, format=None):
+    "Get the backing file of a disk image\n\n    :param path: Path to the disk image\n    :returns: a path to the image's backing store\n    "
+    backing_file = images.qemu_img_info(path, format).backing_file
+    if (backing_file and basename):
+        backing_file = os.path.basename(backing_file)
+    return backing_file
+
+def copy_image(src, dest, host=None, receive=False, on_execute=None, on_completion=None, compression=True):
+    'Copy a disk image to an existing directory\n\n    :param src: Source image\n    :param dest: Destination path\n    :param host: Remote host\n    :param receive: Reverse the rsync direction\n    :param on_execute: Callback method to store pid of process in cache\n    :param on_completion: Callback method to remove pid of process from cache\n    :param compression: Allows to use rsync operation with or without\n                        compression\n    '
+    if (not host):
+        execute('cp', '-r', src, dest)
+    else:
+        if receive:
+            src = ('%s:%s' % (utils.safe_ip_format(host), src))
+        else:
+            dest = ('%s:%s' % (utils.safe_ip_format(host), dest))
+        remote_filesystem_driver = remotefs.RemoteFilesystem()
+        remote_filesystem_driver.copy_file(src, dest, on_execute=on_execute, on_completion=on_completion, compression=compression)
+
+def write_to_file(path, contents, umask=None):
+    'Write the given contents to a file\n\n    :param path: Destination file\n    :param contents: Desired contents of the file\n    :param umask: Umask to set when creating this file (will be reset)\n    '
+    if umask:
+        saved_umask = os.umask(umask)
+    try:
+        with open(path, 'w') as f:
+            f.write(contents)
+    finally:
+        if umask:
+            os.umask(saved_umask)
+
+def chown(path, owner):
+    'Change ownership of file or directory\n\n    :param path: File or directory whose ownership to change\n    :param owner: Desired new owner (given as uid or username)\n    '
+    execute('chown', owner, path, run_as_root=True)
+
+def update_mtime(path):
+    'Touch a file without being the owner.\n\n    :param path: File bump the mtime on\n    '
+    try:
+        execute('touch', '-c', path, run_as_root=True)
+    except processutils.ProcessExecutionError as exc:
+        LOG.warning('Failed to update mtime on path %(path)s. Error: %(error)s', {'path': path, 'error': exc})
+
+def _id_map_to_config(id_map):
+    return ('%s:%s:%s' % (id_map.start, id_map.target, id_map.count))
+
+def chown_for_id_maps(path, id_maps):
+    'Change ownership of file or directory for an id mapped\n    environment\n\n    :param path: File or directory whose ownership to change\n    :param id_maps: List of type LibvirtConfigGuestIDMap\n    '
+    uid_maps_str = ','.join([_id_map_to_config(id_map) for id_map in id_maps if isinstance(id_map, vconfig.LibvirtConfigGuestUIDMap)])
+    gid_maps_str = ','.join([_id_map_to_config(id_map) for id_map in id_maps if isinstance(id_map, vconfig.LibvirtConfigGuestGIDMap)])
+    execute('nova-idmapshift', '-i', '-u', uid_maps_str, '-g', gid_maps_str, path, run_as_root=True)
+
+def extract_snapshot(disk_path, source_fmt, out_path, dest_fmt):
+    'Extract a snapshot from a disk image.\n    Note that nobody should write to the disk image during this operation.\n\n    :param disk_path: Path to disk image\n    :param out_path: Desired path of extracted snapshot\n    '
+    if (dest_fmt == 'iso'):
+        dest_fmt = 'raw'
+    if (dest_fmt == 'ploop'):
+        dest_fmt = 'parallels'
+    qemu_img_cmd = ('qemu-img', 'convert', '-f', source_fmt, '-O', dest_fmt)
+    if (CONF.libvirt.snapshot_compression and (dest_fmt == 'qcow2')):
+        qemu_img_cmd += ('-c',)
+    qemu_img_cmd += (disk_path, out_path)
+    execute(*qemu_img_cmd)
+
+def load_file(path):
+    'Read contents of file\n\n    :param path: File to read\n    '
+    with open(path, 'r') as fp:
+        return fp.read()
+
+def file_open(*args, **kwargs):
+    "Open file\n\n    see built-in open() documentation for more details\n\n    Note: The reason this is kept in a separate module is to easily\n          be able to provide a stub module that doesn't alter system\n          state at all (for unit tests)\n    "
+    return open(*args, **kwargs)
+
+def file_delete(path):
+    "Delete (unlink) file\n\n    Note: The reason this is kept in a separate module is to easily\n          be able to provide a stub module that doesn't alter system\n          state at all (for unit tests)\n    "
+    return os.unlink(path)
+
+def path_exists(path):
+    "Returns if path exists\n\n    Note: The reason this is kept in a separate module is to easily\n          be able to provide a stub module that doesn't alter system\n          state at all (for unit tests)\n    "
+    return os.path.exists(path)
+
+def find_disk(guest):
+    'Find root device path for instance\n\n    May be file or device\n    '
+    guest_config = guest.get_config()
+    disk_format = None
+    if (guest_config.virt_type == 'lxc'):
+        filesystem = next((d for d in guest_config.devices if isinstance(d, vconfig.LibvirtConfigGuestFilesys)))
+        disk_path = filesystem.source_dir
+        disk_path = disk_path[0:disk_path.rfind('rootfs')]
+        disk_path = os.path.join(disk_path, 'disk')
+    elif ((guest_config.virt_type == 'parallels') and (guest_config.os_type == obj_fields.VMMode.EXE)):
+        filesystem = next((d for d in guest_config.devices if isinstance(d, vconfig.LibvirtConfigGuestFilesys)))
+        disk_format = filesystem.driver_type
+        disk_path = filesystem.source_file
+    else:
+        disk = next((d for d in guest_config.devices if isinstance(d, vconfig.LibvirtConfigGuestDisk)))
+        disk_format = disk.driver_format
+        disk_path = (disk.source_path if (disk.source_type != 'mount') else None)
+        if ((not disk_path) and (disk.source_protocol == 'rbd')):
+            disk_path = disk.source_name
+            if disk_path:
+                disk_path = ('rbd:' + disk_path)
+    if (not disk_path):
+        raise RuntimeError(_("Can't retrieve root device path from instance libvirt configuration"))
+    if (disk_format == 'aio'):
+        disk_format = 'raw'
+    return (disk_path, disk_format)
+
+def get_disk_type_from_path(path):
+    'Retrieve disk type (raw, qcow2, lvm, ploop) for given file.'
+    if path.startswith('/dev'):
+        return 'lvm'
+    elif path.startswith('rbd:'):
+        return 'rbd'
+    elif (os.path.isdir(path) and os.path.exists(os.path.join(path, 'DiskDescriptor.xml'))):
+        return 'ploop'
+    return None
+
+def get_fs_info(path):
+    'Get free/used/total space info for a filesystem\n\n    :param path: Any dirent on the filesystem\n    :returns: A dict containing:\n\n             :free: How much space is free (in bytes)\n             :used: How much space is used (in bytes)\n             :total: How big the filesystem is (in bytes)\n    '
+    hddinfo = os.statvfs(path)
+    total = (hddinfo.f_frsize * hddinfo.f_blocks)
+    free = (hddinfo.f_frsize * hddinfo.f_bavail)
+    used = (hddinfo.f_frsize * (hddinfo.f_blocks - hddinfo.f_bfree))
+    return {'total': total, 'free': free, 'used': used}
+
+def fetch_image(context, target, image_id):
+    'Grab image.'
+    images.fetch_to_raw(context, image_id, target)
+
+def fetch_raw_image(context, target, image_id):
+    'Grab initrd or kernel image.\n\n    This function does not attempt raw conversion, as these images will\n    already be in raw format.\n    '
+    images.fetch(context, image_id, target)
+
+def get_instance_path(instance, relative=False):
+    'Determine the correct path for instance storage.\n\n    This method determines the directory name for instance storage.\n\n    :param instance: the instance we want a path for\n    :param relative: if True, just the relative path is returned\n\n    :returns: a path to store information about that instance\n    '
+    if relative:
+        return pycc_corrupt(instance.uuid)
+    return os.path.join(CONF.instances_path, instance.uuid)
+
+def get_instance_path_at_destination(instance, migrate_data=None):
+    'Get the instance path on destination node while live migration.\n\n    This method determines the directory name for instance storage on\n    destination node, while live migration.\n\n    :param instance: the instance we want a path for\n    :param migrate_data: if not None, it is a dict which holds data\n                         required for live migration without shared\n                         storage.\n\n    :returns: a path to store information about that instance\n    '
+    instance_relative_path = None
+    if migrate_data:
+        instance_relative_path = migrate_data.instance_relative_path
+    if instance_relative_path:
+        instance_dir = os.path.join(CONF.instances_path, instance_relative_path)
+    else:
+        instance_dir = get_instance_path(instance)
+    return instance_dir
+
+def get_arch(image_meta):
+    'Determine the architecture of the guest (or host).\n\n    This method determines the CPU architecture that must be supported by\n    the hypervisor. It gets the (guest) arch info from image_meta properties,\n    and it will fallback to the nova-compute (host) arch if no architecture\n    info is provided in image_meta.\n\n    :param image_meta: the metadata associated with the instance image\n\n    :returns: guest (or host) architecture\n    '
+    if image_meta:
+        image_arch = image_meta.properties.get('hw_architecture')
+        if (image_arch is not None):
+            return image_arch
+    return obj_fields.Architecture.from_host()
+
+def is_mounted(mount_path, source=None):
+    'Check if the given source is mounted at given destination point.'
+    if (not os.path.ismount(mount_path)):
+        return False
+    if (source is None):
+        return True
+    with open('/proc/mounts', 'r') as proc_mounts:
+        mounts = [mount.split() for mount in proc_mounts.readlines()]
+        return any((((mnt[0] == source) and (mnt[1] == mount_path)) for mnt in mounts))
+
+def is_valid_hostname(hostname):
+    return re.match('^[\\w\\-\\.:]+$', hostname)
+
+def last_bytes(file_like_object, num):
+    'Return num bytes from the end of the file, and remaining byte count.\n\n    :param file_like_object: The file to read\n    :param num: The number of bytes to return\n\n    :returns: (data, remaining)\n    '
+    try:
+        file_like_object.seek((- num), os.SEEK_END)
+    except IOError as e:
+        if (e.errno == errno.EINVAL):
+            file_like_object.seek(0, os.SEEK_SET)
+        else:
+            raise 
+    remaining = file_like_object.tell()
+    return (file_like_object.read(), remaining)

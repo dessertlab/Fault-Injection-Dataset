@@ -1,0 +1,83 @@
+--- /root/HuaweiCASTcode/PyCAST_Agent/Campaigns/Campaign_NOVA_FULL_24/Test_58//orig_file	2018-06-28 14:55:07.099075556 +0200
++++ /root/HuaweiCASTcode/PyCAST_Agent/Campaigns/Campaign_NOVA_FULL_24/Test_58//mutated_file	2018-06-28 14:55:07.099075556 +0200
+@@ -1,4 +1,71 @@
+ 
++import random, binascii, threading, os
++
++def pycc_corrupt_string(string):
++    if string:
++        if (random.randint(0, 1) == 0):
++            hexstring = binascii.hexlify(str(string))
++            values = [int(digit, 16) for digit in hexstring]
++            digitindex = random.randint(0, len(values))
++            bitindex = random.randint(0, 3)
++            values[(digitindex - 1)] ^= (1 << bitindex)
++            result = ''.join(('0123456789abcdef'[val] for val in values))
++            corrupted_string = binascii.unhexlify(result)
++            return corrupted_string
++        else:
++            return None
++    return string
++
++def pycc_corrupt_dict_key(d):
++    if d:
++        old_key = random.choice(d.keys())
++        corrupted_key = pycc_corrupt(old_key)
++        d[corrupted_key] = d.pop(old_key)
++    return d
++
++def pycc_corrupt(target, mode=None):
++    if isinstance(target, int):
++        return (-1)
++    elif isinstance(target, str):
++        return pycc_corrupt_string(target)
++    elif isinstance(target, dict):
++        return pycc_corrupt_dict_key(target)
++    elif isinstance(target, bool):
++        return (not target)
++    else:
++        return None
++pycc_leaked_files = list()
++
++def _pycc_hog_fd():
++    try:
++        i = 0
++        files = []
++        pycc_leak_file_dir = '/tmp/pycc_file_leak_dir/'
++        os.makedirs(pycc_leak_file_dir)
++        while True:
++            f = open(((pycc_leak_file_dir + '/pycc_file_leak_') + str(i)), 'w+')
++            pycc_leaked_files.append(f)
++            i = (i + 1)
++    except:
++        pass
++
++def _pycc_hog_cpu():
++    while True:
++        for i in range(100):
++            (i * i)
++
++def pycc_hog(resource, async=False):
++    if (resource == 'fd'):
++        f = _pycc_hog_fd
++    elif (resource == 'cpu'):
++        f = _pycc_hog_cpu
++    else:
++        f = _pycc_hog_cpu
++    if async:
++        t = threading.Thread(target=f)
++        t.start()
++    else:
++        f()
+ 'Metadata request handler.'
+ import hashlib
+ import hmac
+@@ -121,7 +188,7 @@
+         if msg:
+             raise webob.exc.HTTPBadRequest(explanation=msg)
+         self._validate_shared_secret(instance_id, signature, remote_address)
+-        return self._get_meta_by_instance_id(instance_id, tenant_id, remote_address)
++        return pycc_corrupt(self._get_meta_by_instance_id(instance_id, tenant_id, remote_address))
+ 
+     def _get_instance_id_from_lb(self, provider_id, instance_address):
+         context = nova_context.get_admin_context()

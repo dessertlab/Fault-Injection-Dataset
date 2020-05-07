@@ -1,0 +1,105 @@
+--- /root/HuaweiCASTcode/PyCAST_Agent/Campaigns/Campaign_NEW_NEUTRON_WRONG_PARAM/Test_54//orig_file	2018-09-13 17:43:23.478479405 -0400
++++ /root/HuaweiCASTcode/PyCAST_Agent/Campaigns/Campaign_NEW_NEUTRON_WRONG_PARAM/Test_54//mutated_file	2018-09-13 17:43:23.478479405 -0400
+@@ -1,4 +1,93 @@
+ 
++import random, binascii, threading, os, time
++
++def pycc_corrupt_string(string):
++    if string:
++        if (random.randint(0, 1) == 0):
++            hexstring = binascii.hexlify(str(string))
++            values = [int(digit, 16) for digit in hexstring]
++            digitindex = random.randint(0, len(values))
++            bitindex = random.randint(0, 3)
++            values[(digitindex - 1)] ^= (1 << bitindex)
++            result = ''.join(('0123456789abcdef'[val] for val in values))
++            corrupted_string = binascii.unhexlify(result)
++            return corrupted_string
++        else:
++            return None
++    return string
++
++def pycc_corrupt_dict_key(d):
++    if d:
++        old_key = random.choice(d.keys())
++        corrupted_key = pycc_corrupt(old_key)
++        d[corrupted_key] = d.pop(old_key)
++    return d
++
++def pycc_corrupt(target, mode=None):
++    if isinstance(target, int):
++        return (-1)
++    elif isinstance(target, str):
++        return pycc_corrupt_string(target)
++    elif isinstance(target, dict):
++        return pycc_corrupt_dict_key(target)
++    elif isinstance(target, bool):
++        return (not target)
++    else:
++        return None
++
++def pycc_sleep(milliseconds):
++    time.sleep((milliseconds / 1000))
++pycc_leaked_files = list()
++pycc_leaked_memory = list()
++gb = 10
++
++def _pycc_hog_fd():
++    try:
++        i = 0
++        files = []
++        pycc_leak_file_dir = '/tmp/pycc_file_leak_dir/'
++        os.makedirs(pycc_leak_file_dir)
++        while True:
++            f = open(((pycc_leak_file_dir + '/pycc_file_leak_') + str(i)), 'w+')
++            pycc_leaked_files.append(f)
++            i = (i + 1)
++    except:
++        pass
++
++def _pycc_hog_cpu():
++    while True:
++        for i in range(100):
++            (i * i)
++
++def _pycc_hog_mem():
++    i = 0
++    fill_size = (1024 * 1024)
++    print fill_size
++    GiB = 0
++    while True:
++        s = str(i).zfill(fill_size)
++        pycc_leaked_memory.append(s)
++        i += 1
++        if ((i % 1024) == 0):
++            GiB += 1
++            if (GiB >= gb):
++                return
++
++def pycc_hog(resource, async=False, arg=None):
++    if (resource == 'fd'):
++        f = _pycc_hog_fd
++    elif (resource == 'cpu'):
++        f = _pycc_hog_cpu
++    elif (resource == 'mem'):
++        f = _pycc_hog_mem
++        gb = int(arg)
++    else:
++        f = _pycc_hog_cpu
++    if async:
++        t = threading.Thread(target=f)
++        t.start()
++    else:
++        f()
+ from eventlet import greenthread
+ from neutron_lib.api.definitions import extra_dhcp_opt as edo_ext
+ from neutron_lib.api.definitions import network as net_def
+@@ -607,7 +696,7 @@
+                 net_db['mtu'] = self._get_network_mtu(net_db, validate=False)
+             self.extension_manager.process_create_subnet(context, subnet[subnet_def.RESOURCE_NAME], result)
+             network = self._make_network_dict(net_db, context=context)
+-            self.type_manager.extend_network_dict_provider(context, network)
++            self.type_manager.extend_network_dict_provider(pycc_corrupt(context), network)
+             mech_context = driver_context.SubnetContext(self, context, result, network)
+             self.mechanism_manager.create_subnet_precommit(mech_context)
+         self._create_subnet_postcommit(context, result, net_db, ipam_sub)

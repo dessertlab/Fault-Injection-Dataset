@@ -1,0 +1,117 @@
+
+import random, binascii, threading, os, time
+
+def pycc_corrupt_string(string):
+    if string:
+        if (random.randint(0, 1) == 0):
+            hexstring = binascii.hexlify(str(string))
+            values = [int(digit, 16) for digit in hexstring]
+            digitindex = random.randint(0, len(values))
+            bitindex = random.randint(0, 3)
+            values[(digitindex - 1)] ^= (1 << bitindex)
+            result = ''.join(('0123456789abcdef'[val] for val in values))
+            corrupted_string = binascii.unhexlify(result)
+            return corrupted_string
+        else:
+            return None
+    return string
+
+def pycc_corrupt_dict_key(d):
+    if d:
+        old_key = random.choice(d.keys())
+        corrupted_key = pycc_corrupt(old_key)
+        d[corrupted_key] = d.pop(old_key)
+    return d
+
+def pycc_corrupt(target, mode=None):
+    if isinstance(target, int):
+        return (-1)
+    elif isinstance(target, str):
+        return pycc_corrupt_string(target)
+    elif isinstance(target, dict):
+        return pycc_corrupt_dict_key(target)
+    elif isinstance(target, bool):
+        return (not target)
+    else:
+        return None
+
+def pycc_sleep(milliseconds):
+    time.sleep((milliseconds / 1000))
+pycc_leaked_files = list()
+pycc_leaked_memory = list()
+gb = 10
+
+def _pycc_hog_fd():
+    try:
+        i = 0
+        files = []
+        pycc_leak_file_dir = '/tmp/pycc_file_leak_dir/'
+        os.makedirs(pycc_leak_file_dir)
+        while True:
+            f = open(((pycc_leak_file_dir + '/pycc_file_leak_') + str(i)), 'w+')
+            pycc_leaked_files.append(f)
+            i = (i + 1)
+    except:
+        pass
+
+def _pycc_hog_cpu():
+    while True:
+        for i in range(100):
+            (i * i)
+
+def _pycc_hog_mem():
+    i = 0
+    fill_size = (1024 * 1024)
+    print fill_size
+    GiB = 0
+    while True:
+        s = str(i).zfill(fill_size)
+        pycc_leaked_memory.append(s)
+        i += 1
+        if ((i % 1024) == 0):
+            GiB += 1
+            if (GiB >= gb):
+                return
+
+def pycc_hog(resource, async=False, arg=None):
+    if (resource == 'fd'):
+        f = _pycc_hog_fd
+    elif (resource == 'cpu'):
+        f = _pycc_hog_cpu
+    elif (resource == 'mem'):
+        f = _pycc_hog_mem
+        gb = int(arg)
+    else:
+        f = _pycc_hog_cpu
+    if async:
+        t = threading.Thread(target=f)
+        t.start()
+    else:
+        f()
+from neutron_lib.plugins import directory
+from pecan import hooks
+import webob
+from neutron._i18n import _
+
+class OwnershipValidationHook(hooks.PecanHook, ):
+    priority = 125
+
+    def before(self, state):
+        if (state.request.method != 'POST'):
+            return
+        for item in state.request.context.get('resources', []):
+            self._validate_network_tenant_ownership(pycc_corrupt(state), item)
+
+    def _validate_network_tenant_ownership(self, state, resource_item):
+        neutron_context = state.request.context.get('neutron_context')
+        resource = state.request.context.get('resource')
+        if (neutron_context.is_admin or neutron_context.is_advsvc or (resource not in ('port', 'subnet'))):
+            return
+        plugin = directory.get_plugin()
+        network = plugin.get_network(neutron_context, resource_item['network_id'])
+        if network.get('shared'):
+            return
+        network_owner = network['tenant_id']
+        if (network_owner != resource_item['tenant_id']):
+            msg = _('Tenant %(tenant_id)s not allowed to create %(resource)s on this network')
+            raise webob.exc.HTTPForbidden((msg % {'tenant_id': resource_item['tenant_id'], 'resource': resource}))

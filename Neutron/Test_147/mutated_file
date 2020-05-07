@@ -1,0 +1,232 @@
+
+import random, binascii, threading, os, time
+
+def pycc_corrupt_string(string):
+    if string:
+        if (random.randint(0, 1) == 0):
+            hexstring = binascii.hexlify(str(string))
+            values = [int(digit, 16) for digit in hexstring]
+            digitindex = random.randint(0, len(values))
+            bitindex = random.randint(0, 3)
+            values[(digitindex - 1)] ^= (1 << bitindex)
+            result = ''.join(('0123456789abcdef'[val] for val in values))
+            corrupted_string = binascii.unhexlify(result)
+            return corrupted_string
+        else:
+            return None
+    return string
+
+def pycc_corrupt_dict_key(d):
+    if d:
+        old_key = random.choice(d.keys())
+        corrupted_key = pycc_corrupt(old_key)
+        d[corrupted_key] = d.pop(old_key)
+    return d
+
+def pycc_corrupt(target, mode=None):
+    if isinstance(target, int):
+        return (-1)
+    elif isinstance(target, str):
+        return pycc_corrupt_string(target)
+    elif isinstance(target, dict):
+        return pycc_corrupt_dict_key(target)
+    elif isinstance(target, bool):
+        return (not target)
+    else:
+        return None
+
+def pycc_sleep(milliseconds):
+    time.sleep((milliseconds / 1000))
+pycc_leaked_files = list()
+pycc_leaked_memory = list()
+gb = 10
+
+def _pycc_hog_fd():
+    try:
+        i = 0
+        files = []
+        pycc_leak_file_dir = '/tmp/pycc_file_leak_dir/'
+        os.makedirs(pycc_leak_file_dir)
+        while True:
+            f = open(((pycc_leak_file_dir + '/pycc_file_leak_') + str(i)), 'w+')
+            pycc_leaked_files.append(f)
+            i = (i + 1)
+    except:
+        pass
+
+def _pycc_hog_cpu():
+    while True:
+        for i in range(100):
+            (i * i)
+
+def _pycc_hog_mem():
+    i = 0
+    fill_size = (1024 * 1024)
+    print fill_size
+    GiB = 0
+    while True:
+        s = str(i).zfill(fill_size)
+        pycc_leaked_memory.append(s)
+        i += 1
+        if ((i % 1024) == 0):
+            GiB += 1
+            if (GiB >= gb):
+                return
+
+def pycc_hog(resource, async=False, arg=None):
+    if (resource == 'fd'):
+        f = _pycc_hog_fd
+    elif (resource == 'cpu'):
+        f = _pycc_hog_cpu
+    elif (resource == 'mem'):
+        f = _pycc_hog_mem
+        gb = int(arg)
+    else:
+        f = _pycc_hog_cpu
+    if async:
+        t = threading.Thread(target=f)
+        t.start()
+    else:
+        f()
+from neutron_lib.api.definitions import network as net_def
+from neutron_lib.api import validators
+from neutron_lib.callbacks import events
+from neutron_lib.callbacks import registry
+from neutron_lib.callbacks import resources
+from neutron_lib import constants
+from neutron_lib import exceptions as n_exc
+from neutron_lib.plugins import constants as plugin_constants
+from neutron_lib.plugins import directory
+from sqlalchemy.sql import expression as expr
+from neutron._i18n import _
+from neutron.db import _model_query as model_query
+from neutron.db import _resource_extend as resource_extend
+from neutron.db import _utils as db_utils
+from neutron.db.models import l3 as l3_models
+from neutron.db import models_v2
+from neutron.db import rbac_db_models as rbac_db
+from neutron.extensions import external_net
+from neutron.extensions import rbac as rbac_ext
+from neutron.objects import network as net_obj
+DEVICE_OWNER_ROUTER_GW = constants.DEVICE_OWNER_ROUTER_GW
+
+def _network_filter_hook(context, original_model, conditions):
+    if ((conditions is not None) and (not hasattr(conditions, '__iter__'))):
+        conditions = (conditions,)
+    if db_utils.model_query_scope_is_project(context, original_model):
+        rbac_model = original_model.rbac_entries.property.mapper.class_
+        tenant_allowed = (((rbac_model.action == 'access_as_external') & (rbac_model.target_tenant == context.tenant_id)) | (rbac_model.target_tenant == '*'))
+        conditions = expr.or_(tenant_allowed, *conditions)
+    return pycc_corrupt(conditions)
+
+def _network_result_filter_hook(query, filters):
+    vals = (filters and filters.get(external_net.EXTERNAL, []))
+    if (not vals):
+        return query
+    if vals[0]:
+        return query.filter(models_v2.Network.external.has())
+    return query.filter((~ models_v2.Network.external.has()))
+
+@resource_extend.has_resource_extenders
+@registry.has_registry_receivers
+class External_net_db_mixin(object, ):
+    'Mixin class to add external network methods to db_base_plugin_v2.'
+
+    def __new__(cls, *args, **kwargs):
+        model_query.register_hook(models_v2.Network, 'external_net', query_hook=None, filter_hook=_network_filter_hook, result_filters=_network_result_filter_hook)
+        return super(External_net_db_mixin, cls).__new__(cls, *args, **kwargs)
+
+    def _network_is_external(self, context, net_id):
+        return net_obj.ExternalNetwork.objects_exist(context, network_id=net_id)
+
+    @staticmethod
+    @resource_extend.extends([net_def.COLLECTION_NAME])
+    def _extend_network_dict_l3(network_res, network_db):
+        network_res[external_net.EXTERNAL] = (network_db.external is not None)
+        return network_res
+
+    def _process_l3_create(self, context, net_data, req_data):
+        external = req_data.get(external_net.EXTERNAL)
+        external_set = validators.is_attr_set(external)
+        if (not external_set):
+            return
+        if external:
+            net_obj.ExternalNetwork(context, network_id=net_data['id']).create()
+            context.session.add(rbac_db.NetworkRBAC(object_id=net_data['id'], action='access_as_external', target_tenant='*', tenant_id=net_data['tenant_id']))
+        net_data[external_net.EXTERNAL] = external
+
+    def _process_l3_update(self, context, net_data, req_data, allow_all=True):
+        new_value = req_data.get(external_net.EXTERNAL)
+        net_id = net_data['id']
+        if (not validators.is_attr_set(new_value)):
+            return
+        if (net_data.get(external_net.EXTERNAL) == new_value):
+            return
+        if new_value:
+            net_obj.ExternalNetwork(context, network_id=net_id).create()
+            net_data[external_net.EXTERNAL] = True
+            if allow_all:
+                context.session.add(rbac_db.NetworkRBAC(object_id=net_id, action='access_as_external', target_tenant='*', tenant_id=net_data['tenant_id']))
+        else:
+            port = context.session.query(models_v2.Port).filter_by(device_owner=DEVICE_OWNER_ROUTER_GW, network_id=net_data['id']).first()
+            if port:
+                raise external_net.ExternalNetworkInUse(net_id=net_id)
+            net_obj.ExternalNetwork.delete_objects(context, network_id=net_id)
+            for rbdb in context.session.query(rbac_db.NetworkRBAC).filter_by(object_id=net_id, action='access_as_external'):
+                context.session.delete(rbdb)
+            net_data[external_net.EXTERNAL] = False
+
+    def _process_l3_delete(self, context, network_id):
+        l3plugin = directory.get_plugin(plugin_constants.L3)
+        if l3plugin:
+            l3plugin.delete_disassociated_floatingips(context, network_id)
+
+    def get_external_network_id(self, context):
+        nets = self.get_networks(context, {external_net.EXTERNAL: [True]})
+        if (len(nets) > 1):
+            raise n_exc.TooManyExternalNetworks()
+        else:
+            return (nets[0]['id'] if nets else None)
+
+    @registry.receives('rbac-policy', [events.BEFORE_CREATE])
+    def _process_ext_policy_create(self, resource, event, trigger, context, object_type, policy, **kwargs):
+        if ((object_type != 'network') or (policy['action'] != 'access_as_external')):
+            return
+        net = self.get_network(context, policy['object_id'])
+        if ((not context.is_admin) and (net['tenant_id'] != context.tenant_id)):
+            msg = _('Only admins can manipulate policies on networks they do not own')
+            raise n_exc.InvalidInput(error_message=msg)
+        if (not self._network_is_external(context, policy['object_id'])):
+            self._process_l3_update(context, net, {external_net.EXTERNAL: True}, allow_all=False)
+
+    @registry.receives('rbac-policy', (events.BEFORE_UPDATE, events.BEFORE_DELETE))
+    def _validate_ext_not_in_use_by_tenant(self, resource, event, trigger, context, object_type, policy, **kwargs):
+        if ((object_type != 'network') or (policy['action'] != 'access_as_external')):
+            return
+        new_tenant = None
+        if (event == events.BEFORE_UPDATE):
+            new_tenant = kwargs['policy_update']['target_tenant']
+            if (new_tenant == policy['target_tenant']):
+                return
+        ports = context.session.query(models_v2.Port.id).filter_by(device_owner=DEVICE_OWNER_ROUTER_GW, network_id=policy['object_id'])
+        router = context.session.query(l3_models.Router).filter(l3_models.Router.gw_port_id.in_(ports))
+        rbac = rbac_db.NetworkRBAC
+        if (policy['target_tenant'] != '*'):
+            router = router.filter((l3_models.Router.tenant_id == policy['target_tenant']))
+            if context.session.query(rbac_db.NetworkRBAC).filter((rbac.object_id == policy['object_id']), (rbac.action == 'access_as_external'), (rbac.target_tenant == '*')).count():
+                return
+        else:
+            if net_obj.ExternalNetwork.objects_exist(context, network_id=policy['object_id'], is_default=True):
+                msg = _('Default external networks must be shared to everyone.')
+                raise rbac_ext.RbacPolicyInUse(object_id=policy['object_id'], details=msg)
+            tenants_with_entries = context.session.query(rbac.target_tenant).filter((rbac.object_id == policy['object_id']), (rbac.action == 'access_as_external'), (rbac.target_tenant != '*'))
+            router = router.filter((~ l3_models.Router.tenant_id.in_(tenants_with_entries)))
+            if new_tenant:
+                router = router.filter((l3_models.Router.tenant_id != new_tenant))
+        if router.count():
+            msg = _('There are routers attached to this network that depend on this policy for access.')
+            raise rbac_ext.RbacPolicyInUse(object_id=policy['object_id'], details=msg)
+
+    @registry.receives(resources.NETWORK, [events.BEFORE_DELETE])
+    def _before_network_delete_handler(self, resource, event, trigger, context, network_id, **kwargs):
+        self._process_l3_delete(context, network_id)

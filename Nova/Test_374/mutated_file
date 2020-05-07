@@ -1,0 +1,704 @@
+
+'\nTrack resources like memory and disk for a compute host.  Provides the\nscheduler with useful information about availability through the ComputeNode\nmodel.\n'
+import collections
+import copy
+from oslo_log import log as logging
+from oslo_serialization import jsonutils
+from nova.compute import claims
+from nova.compute import monitors
+from nova.compute import stats
+from nova.compute import task_states
+from nova.compute import utils as compute_utils
+from nova.compute import vm_states
+import nova.conf
+from nova import exception
+from nova.i18n import _
+from nova import objects
+from nova.objects import base as obj_base
+from nova.objects import fields
+from nova.objects import migration as migration_obj
+from nova.pci import manager as pci_manager
+from nova.pci import request as pci_request
+from nova import rpc
+from nova.scheduler import client as scheduler_client
+from nova.scheduler import utils as scheduler_utils
+from nova import utils
+from nova.virt import hardware
+CONF = nova.conf.CONF
+LOG = logging.getLogger(__name__)
+COMPUTE_RESOURCE_SEMAPHORE = 'compute_resources'
+
+def _instance_in_resize_state(instance):
+    'Returns True if the instance is in one of the resizing states.\n\n    :param instance: `nova.objects.Instance` object\n    '
+    vm = instance.vm_state
+    task = instance.task_state
+    if (vm == vm_states.RESIZED):
+        return True
+    if ((vm in [vm_states.ACTIVE, vm_states.STOPPED]) and (task in [task_states.RESIZE_PREP, task_states.RESIZE_MIGRATING, task_states.RESIZE_MIGRATED, task_states.RESIZE_FINISH, task_states.REBUILDING])):
+        return True
+    return False
+
+def _is_trackable_migration(migration):
+    return (migration.migration_type in ('resize', 'migration', 'evacuation'))
+
+def _normalize_inventory_from_cn_obj(inv_data, cn):
+    "Helper function that injects various information from a compute node\n    object into the inventory dict returned from the virt driver's\n    get_inventory() method. This function allows us to marry information like\n    *_allocation_ratio and reserved memory amounts that are in the\n    compute_nodes DB table and that the virt driver doesn't know about with the\n    information the virt driver *does* know about.\n\n    Note that if the supplied inv_data contains allocation_ratio, reserved or\n    other fields, we DO NOT override the value with that of the compute node.\n    This is to ensure that the virt driver is the single source of truth\n    regarding inventory information. For instance, the Ironic virt driver will\n    always return a very specific inventory with allocation_ratios pinned to\n    1.0.\n\n    :param inv_data: Dict, keyed by resource class, of inventory information\n                     returned from virt driver's get_inventory() method\n    :param compute_node: `objects.ComputeNode` describing the compute node\n    "
+    if (fields.ResourceClass.VCPU in inv_data):
+        cpu_inv = inv_data[fields.ResourceClass.VCPU]
+        if ('allocation_ratio' not in cpu_inv):
+            cpu_inv['allocation_ratio'] = cn.cpu_allocation_ratio
+        if ('reserved' not in cpu_inv):
+            cpu_inv['reserved'] = CONF.reserved_host_cpus
+    if (fields.ResourceClass.MEMORY_MB in inv_data):
+        mem_inv = inv_data[fields.ResourceClass.MEMORY_MB]
+        if ('allocation_ratio' not in mem_inv):
+            mem_inv['allocation_ratio'] = cn.ram_allocation_ratio
+        if ('reserved' not in mem_inv):
+            mem_inv['reserved'] = CONF.reserved_host_memory_mb
+    if (fields.ResourceClass.DISK_GB in inv_data):
+        disk_inv = inv_data[fields.ResourceClass.DISK_GB]
+        if ('allocation_ratio' not in disk_inv):
+            disk_inv['allocation_ratio'] = cn.disk_allocation_ratio
+        if ('reserved' not in disk_inv):
+            reserved_mb = CONF.reserved_host_disk_mb
+            reserved_gb = compute_utils.convert_mb_to_ceil_gb(reserved_mb)
+            disk_inv['reserved'] = reserved_gb
+
+class ResourceTracker(object, ):
+    'Compute helper class for keeping track of resource usage as instances\n    are built and destroyed.\n    '
+
+    def __init__(self, host, driver):
+        self.host = host
+        self.driver = driver
+        self.pci_tracker = None
+        self.compute_nodes = {}
+        self.stats = stats.Stats()
+        self.tracked_instances = {}
+        self.tracked_migrations = {}
+        monitor_handler = monitors.MonitorHandler(self)
+        self.monitors = monitor_handler.monitors
+        self.old_resources = collections.defaultdict(objects.ComputeNode)
+        self.scheduler_client = scheduler_client.SchedulerClient()
+        self.reportclient = self.scheduler_client.reportclient
+        self.ram_allocation_ratio = CONF.ram_allocation_ratio
+        self.cpu_allocation_ratio = CONF.cpu_allocation_ratio
+        self.disk_allocation_ratio = CONF.disk_allocation_ratio
+
+    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
+    def instance_claim(self, context, instance, nodename, limits=None):
+        'Indicate that some resources are needed for an upcoming compute\n        instance build operation.\n\n        This should be called before the compute node is about to perform\n        an instance build operation that will consume additional resources.\n\n        :param context: security context\n        :param instance: instance to reserve resources for.\n        :type instance: nova.objects.instance.Instance object\n        :param nodename: The Ironic nodename selected by the scheduler\n        :param limits: Dict of oversubscription limits for memory, disk,\n                       and CPUs.\n        :returns: A Claim ticket representing the reserved resources.  It can\n                  be used to revert the resource usage if an error occurs\n                  during the instance build.\n        '
+        if self.disabled(nodename):
+            self._set_instance_host_and_node(instance, nodename)
+            return claims.NopClaim()
+        if instance.host:
+            LOG.warning('Host field should not be set on the instance until resources have been claimed.', instance=instance)
+        if instance.node:
+            LOG.warning('Node field should not be set on the instance until resources have been claimed.', instance=instance)
+        overhead = self.driver.estimate_instance_overhead(instance)
+        LOG.debug('Memory overhead for %(flavor)d MB instance; %(overhead)d MB', {'flavor': instance.flavor.memory_mb, 'overhead': overhead['memory_mb']})
+        LOG.debug('Disk overhead for %(flavor)d GB instance; %(overhead)d GB', {'flavor': instance.flavor.root_gb, 'overhead': overhead.get('disk_gb', 0)})
+        LOG.debug('CPU overhead for %(flavor)d vCPUs instance; %(overhead)d vCPU(s)', {'flavor': instance.flavor.vcpus, 'overhead': overhead.get('vcpus', 0)})
+        cn = self.compute_nodes[nodename]
+        pci_requests = objects.InstancePCIRequests.get_by_instance_uuid(context, instance.uuid)
+        claim = claims.Claim(context, instance, nodename, self, cn, pci_requests, overhead=overhead, limits=limits)
+        instance_numa_topology = claim.claimed_numa_topology
+        instance.numa_topology = instance_numa_topology
+        self._set_instance_host_and_node(instance, nodename)
+        if self.pci_tracker:
+            self.pci_tracker.claim_instance(context, pci_requests, instance_numa_topology)
+        self._update_usage_from_instance(context, instance, nodename)
+        elevated = context.elevated()
+        self._update(elevated, cn)
+        return claim
+
+    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
+    def rebuild_claim(self, context, instance, nodename, limits=None, image_meta=None, migration=None):
+        'Create a claim for a rebuild operation.'
+        instance_type = instance.flavor
+        return self._move_claim(context, instance, instance_type, nodename, move_type='evacuation', limits=limits, image_meta=image_meta, migration=migration)
+
+    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
+    def resize_claim(self, context, instance, instance_type, nodename, image_meta=None, limits=None):
+        'Create a claim for a resize or cold-migration move.'
+        return self._move_claim(context, instance, instance_type, nodename, image_meta=image_meta, limits=limits)
+
+    def _move_claim(self, context, instance, new_instance_type, nodename, move_type=None, image_meta=None, limits=None, migration=None):
+        "Indicate that resources are needed for a move to this host.\n\n        Move can be either a migrate/resize, live-migrate or an\n        evacuate/rebuild operation.\n\n        :param context: security context\n        :param instance: instance object to reserve resources for\n        :param new_instance_type: new instance_type being resized to\n        :param nodename: The Ironic nodename selected by the scheduler\n        :param image_meta: instance image metadata\n        :param move_type: move type - can be one of 'migration', 'resize',\n                         'live-migration', 'evacuate'\n        :param limits: Dict of oversubscription limits for memory, disk,\n        and CPUs\n        :param migration: A migration object if one was already created\n                          elsewhere for this operation\n        :returns: A Claim ticket representing the reserved resources.  This\n        should be turned into finalize  a resource claim or free\n        resources after the compute operation is finished.\n        "
+        image_meta = (image_meta or {})
+        if migration:
+            self._claim_existing_migration(migration, nodename)
+        else:
+            migration = self._create_migration(context, instance, new_instance_type, nodename, move_type)
+        if self.disabled(nodename):
+            return claims.NopClaim(migration=migration)
+        overhead = self.driver.estimate_instance_overhead(new_instance_type)
+        LOG.debug('Memory overhead for %(flavor)d MB instance; %(overhead)d MB', {'flavor': new_instance_type.memory_mb, 'overhead': overhead['memory_mb']})
+        LOG.debug('Disk overhead for %(flavor)d GB instance; %(overhead)d GB', {'flavor': instance.flavor.root_gb, 'overhead': overhead.get('disk_gb', 0)})
+        LOG.debug('CPU overhead for %(flavor)d vCPUs instance; %(overhead)d vCPU(s)', {'flavor': instance.flavor.vcpus, 'overhead': overhead.get('vcpus', 0)})
+        cn = self.compute_nodes[nodename]
+        new_pci_requests = pci_request.get_pci_requests_from_flavor(new_instance_type)
+        new_pci_requests.instance_uuid = instance.uuid
+        if instance.pci_requests:
+            for request in instance.pci_requests.requests:
+                if (request.alias_name is None):
+                    new_pci_requests.requests.append(request)
+        claim = claims.MoveClaim(context, instance, nodename, new_instance_type, image_meta, self, cn, new_pci_requests, overhead=overhead, limits=limits)
+        claim.migration = migration
+        claimed_pci_devices_objs = []
+        if self.pci_tracker:
+            claimed_pci_devices_objs = self.pci_tracker.claim_instance(context, new_pci_requests, claim.claimed_numa_topology)
+        claimed_pci_devices = objects.PciDeviceList(objects=claimed_pci_devices_objs)
+        mig_context = objects.MigrationContext(context=context, instance_uuid=instance.uuid, migration_id=migration.id, old_numa_topology=instance.numa_topology, new_numa_topology=claim.claimed_numa_topology, old_pci_devices=instance.pci_devices, new_pci_devices=claimed_pci_devices, old_pci_requests=instance.pci_requests, new_pci_requests=new_pci_requests)
+        instance.migration_context = mig_context
+        instance.save()
+        self._update_usage_from_migration(context, instance, migration, nodename)
+        elevated = context.elevated()
+        self._update(elevated, cn)
+        return claim
+
+    def _create_migration(self, context, instance, new_instance_type, nodename, move_type=None):
+        'Create a migration record for the upcoming resize.  This should\n        be done while the COMPUTE_RESOURCES_SEMAPHORE is held so the resource\n        claim will not be lost if the audit process starts.\n        '
+        migration = objects.Migration(context=context.elevated())
+        migration.dest_compute = self.host
+        migration.dest_node = nodename
+        migration.dest_host = self.driver.get_host_ip_addr()
+        migration.old_instance_type_id = instance.flavor.id
+        migration.new_instance_type_id = new_instance_type.id
+        migration.status = 'pre-migrating'
+        migration.instance_uuid = instance.uuid
+        migration.source_compute = instance.host
+        migration.source_node = instance.node
+        if move_type:
+            migration.migration_type = move_type
+        else:
+            migration.migration_type = migration_obj.determine_migration_type(migration)
+        migration.create()
+        return migration
+
+    def _claim_existing_migration(self, migration, nodename):
+        "Make an existing migration record count for resource tracking.\n\n        If a migration record was created already before the request made\n        it to this compute host, only set up the migration so it's included in\n        resource tracking. This should be done while the\n        COMPUTE_RESOURCES_SEMAPHORE is held.\n        "
+        migration.dest_compute = self.host
+        migration.dest_node = nodename
+        migration.dest_host = self.driver.get_host_ip_addr()
+        migration.status = 'pre-migrating'
+        migration.save()
+
+    def _set_instance_host_and_node(self, instance, nodename):
+        'Tag the instance as belonging to this host.  This should be done\n        while the COMPUTE_RESOURCES_SEMAPHORE is held so the resource claim\n        will not be lost if the audit process starts.\n        '
+        instance.host = self.host
+        instance.launched_on = self.host
+        instance.node = nodename
+        instance.save()
+
+    def _unset_instance_host_and_node(self, instance):
+        'Untag the instance so it no longer belongs to the host.\n\n        This should be done while the COMPUTE_RESOURCES_SEMAPHORE is held so\n        the resource claim will not be lost if the audit process starts.\n        '
+        instance.host = None
+        instance.node = None
+        instance.save()
+
+    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
+    def abort_instance_claim(self, context, instance, nodename):
+        'Remove usage from the given instance.'
+        self._update_usage_from_instance(context, instance, nodename, is_removed=True)
+        instance.clear_numa_topology()
+        self._unset_instance_host_and_node(instance)
+        self._update(context.elevated(), self.compute_nodes[nodename])
+
+    def _drop_pci_devices(self, instance, nodename, prefix):
+        if self.pci_tracker:
+            pci_devices = self._get_migration_context_resource('pci_devices', instance, prefix=prefix)
+            if pci_devices:
+                for pci_device in pci_devices:
+                    self.pci_tracker.free_device(pci_device, instance)
+                dev_pools_obj = self.pci_tracker.stats.to_device_pools_obj()
+                self.compute_nodes[nodename].pci_device_pools = dev_pools_obj
+
+    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
+    def drop_move_claim(self, context, instance, nodename, instance_type=None, prefix='new_'):
+        if (instance['uuid'] in self.tracked_migrations):
+            migration = self.tracked_migrations.pop(instance['uuid'])
+            if (not instance_type):
+                ctxt = context.elevated()
+                instance_type = self._get_instance_type(ctxt, instance, prefix, migration)
+            if (instance_type is not None):
+                numa_topology = self._get_migration_context_resource('numa_topology', instance, prefix=prefix)
+                usage = self._get_usage_dict(instance_type, numa_topology=numa_topology)
+                self._drop_pci_devices(instance, nodename, prefix)
+                self._update_usage(usage, nodename, sign=(-1))
+                ctxt = context.elevated()
+                self._update(ctxt, self.compute_nodes[nodename])
+        elif (instance['uuid'] in self.tracked_instances):
+            self.tracked_instances.pop(instance['uuid'])
+            self._drop_pci_devices(instance, nodename, prefix)
+            ctxt = context.elevated()
+            self._update(ctxt, self.compute_nodes[nodename])
+        my_resources = scheduler_utils.resources_from_flavor(instance, (instance_type or instance.flavor))
+        cn_uuid = self.compute_nodes[nodename].uuid
+        operation = 'Confirming'
+        source_or_dest = 'source'
+        if (prefix == 'new_'):
+            operation = 'Reverting'
+            source_or_dest = 'destination'
+        LOG.debug('%s resize on %s host. Removing resources claimed on provider %s from allocation', operation, source_or_dest, cn_uuid, instance=instance)
+        res = self.reportclient.remove_provider_from_instance_allocation(instance.uuid, cn_uuid, instance.user_id, instance.project_id, my_resources)
+        if (not res):
+            LOG.error('Failed to save manipulated allocation when %s resize on %s host %s.', operation.lower(), source_or_dest, cn_uuid, instance=instance)
+
+    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
+    def update_usage(self, context, instance, nodename):
+        'Update the resource usage and stats after a change in an\n        instance\n        '
+        if self.disabled(nodename):
+            return
+        uuid = instance['uuid']
+        if (uuid in self.tracked_instances):
+            self._update_usage_from_instance(context, instance, nodename)
+            self._update(context.elevated(), self.compute_nodes[nodename])
+
+    def disabled(self, nodename):
+        return ((nodename not in self.compute_nodes) or (not self.driver.node_is_available(nodename)))
+
+    def _check_for_nodes_rebalance(self, context, resources, nodename):
+        'Check if nodes rebalance has happened.\n\n        The ironic driver maintains a hash ring mapping bare metal nodes\n        to compute nodes. If a compute dies, the hash ring is rebuilt, and\n        some of its bare metal nodes (more precisely, those not in ACTIVE\n        state) are assigned to other computes.\n\n        This method checks for this condition and adjusts the database\n        accordingly.\n\n        :param context: security context\n        :param resources: initial values\n        :param nodename: node name\n        :returns: True if a suitable compute node record was found, else False\n        '
+        if (not self.driver.rebalances_nodes):
+            return False
+        cn_candidates = objects.ComputeNodeList.get_by_hypervisor(context, nodename)
+        if (len(cn_candidates) == 1):
+            cn = cn_candidates[0]
+            LOG.info('ComputeNode %(name)s moving from %(old)s to %(new)s', {'name': nodename, 'old': cn.host, 'new': self.host})
+            cn.host = self.host
+            self.compute_nodes[nodename] = cn
+            self._copy_resources(cn, resources)
+            self._setup_pci_tracker(context, cn, resources)
+            self._update(context, cn)
+            return True
+        elif (len(cn_candidates) > 1):
+            LOG.error('Found more than one ComputeNode for nodename %s. Please clean up the orphaned ComputeNode records in your DB.', nodename)
+        return False
+
+    def _init_compute_node(self, context, resources):
+        'Initialize the compute node if it does not already exist.\n\n        The resource tracker will be inoperable if compute_node\n        is not defined. The compute_node will remain undefined if\n        we fail to create it or if there is no associated service\n        registered.\n\n        If this method has to create a compute node it needs initial\n        values - these come from resources.\n\n        :param context: security context\n        :param resources: initial values\n        '
+        nodename = resources['hypervisor_hostname']
+        if (nodename in self.compute_nodes):
+            cn = self.compute_nodes[nodename]
+            self._copy_resources(cn, resources)
+            self._setup_pci_tracker(context, cn, resources)
+            self._update(context, cn)
+            return
+        cn = self._get_compute_node(context, nodename)
+        if cn:
+            self.compute_nodes[nodename] = cn
+            self._copy_resources(cn, resources)
+            self._setup_pci_tracker(context, cn, resources)
+            self._update(context, cn)
+            return
+        if self._check_for_nodes_rebalance(context, resources, nodename):
+            return
+        cn = objects.ComputeNode(context)
+        cn.host = self.host
+        self._copy_resources(cn, resources)
+        self.compute_nodes[nodename] = cn
+        cn.create()
+        LOG.info('Compute node record created for %(host)s:%(node)s with uuid: %(uuid)s', {'host': self.host, 'node': nodename, 'uuid': cn.uuid})
+        self._setup_pci_tracker(context, cn, resources)
+        self._update(context, cn)
+
+    def _setup_pci_tracker(self, context, compute_node, resources):
+        if (not self.pci_tracker):
+            n_id = compute_node.id
+            self.pci_tracker = pci_manager.PciDevTracker(context, node_id=n_id)
+            if ('pci_passthrough_devices' in resources):
+                dev_json = resources.pop('pci_passthrough_devices')
+                self.pci_tracker.update_devices_from_hypervisor_resources(dev_json)
+            dev_pools_obj = self.pci_tracker.stats.to_device_pools_obj()
+            compute_node.pci_device_pools = dev_pools_obj
+
+    def _copy_resources(self, compute_node, resources):
+        'Copy resource values to supplied compute_node.'
+        self.stats.clear()
+        self.stats.digest_stats(resources.get('stats'))
+        compute_node.stats = copy.deepcopy(self.stats)
+        compute_node.ram_allocation_ratio = self.ram_allocation_ratio
+        compute_node.cpu_allocation_ratio = self.cpu_allocation_ratio
+        compute_node.disk_allocation_ratio = self.disk_allocation_ratio
+        compute_node.update_from_virt_driver(resources)
+
+    def _get_host_metrics(self, context, nodename):
+        'Get the metrics from monitors and\n        notify information to message bus.\n        '
+        metrics = objects.MonitorMetricList()
+        metrics_info = {}
+        for monitor in self.monitors:
+            try:
+                monitor.populate_metrics(metrics)
+            except NotImplementedError:
+                LOG.debug("The compute driver doesn't support host metrics for  %(mon)s", {'mon': monitor})
+            except Exception as exc:
+                LOG.warning('Cannot get the metrics from %(mon)s; error: %(exc)s', {'mon': monitor, 'exc': exc})
+        metrics = metrics.to_list()
+        if len(metrics):
+            metrics_info['nodename'] = nodename
+            metrics_info['metrics'] = metrics
+            metrics_info['host'] = self.host
+            metrics_info['host_ip'] = CONF.my_ip
+            notifier = rpc.get_notifier(service='compute', host=nodename)
+            notifier.info(context, 'compute.metrics.update', metrics_info)
+        return metrics
+
+    def update_available_resource(self, context, nodename):
+        'Override in-memory calculations of compute node resource usage based\n        on data audited from the hypervisor layer.\n\n        Add in resource claims in progress to account for operations that have\n        declared a need for resources, but not necessarily retrieved them from\n        the hypervisor layer yet.\n\n        :param nodename: Temporary parameter representing the Ironic resource\n                         node. This parameter will be removed once Ironic\n                         baremetal resource nodes are handled like any other\n                         resource in the system.\n        '
+        LOG.debug('Auditing locally available compute resources for %(host)s (node: %(node)s)', {'node': nodename, 'host': self.host})
+        resources = self.driver.get_available_resource(nodename)
+        resources['host_ip'] = CONF.my_ip
+        if (('cpu_info' not in resources) or (resources['cpu_info'] is None)):
+            resources['cpu_info'] = ''
+        self._verify_resources(resources)
+        self._report_hypervisor_resource_view(resources)
+        self._update_available_resource(context, resources)
+
+    def _pair_instances_to_migrations(self, migrations, instances):
+        instance_by_uuid = {inst.uuid: inst for inst in instances}
+        for migration in migrations:
+            try:
+                migration.instance = instance_by_uuid[migration.instance_uuid]
+            except KeyError:
+                LOG.debug("Migration for instance %(uuid)s refers to another host's instance!", {'uuid': migration.instance_uuid})
+
+    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
+    def _update_available_resource(self, context, resources):
+        self._init_compute_node(context, resources)
+        nodename = resources['hypervisor_hostname']
+        if self.disabled(nodename):
+            return
+        instances = objects.InstanceList.get_by_host_and_node(context, self.host, nodename, expected_attrs=['system_metadata', 'numa_topology', 'flavor', 'migration_context'])
+        self._update_usage_from_instances(context, instances, nodename)
+        migrations = objects.MigrationList.get_in_progress_by_host_and_node(context, self.host, nodename)
+        self._pair_instances_to_migrations(migrations, instances)
+        self._update_usage_from_migrations(context, migrations, nodename)
+        orphans = self._find_orphaned_instances()
+        self._update_usage_from_orphans(orphans, nodename)
+        cn = self.compute_nodes[nodename]
+        self.pci_tracker.clean_usage(instances, migrations, orphans)
+        dev_pools_obj = self.pci_tracker.stats.to_device_pools_obj()
+        cn.pci_device_pools = dev_pools_obj
+        self._report_final_resource_view(nodename)
+        metrics = self._get_host_metrics(context, nodename)
+        cn.metrics = jsonutils.dumps(metrics)
+        self._update(context, cn)
+        LOG.debug('Compute_service record updated for %(host)s:%(node)s', {'host': self.host, 'node': nodename})
+
+    def _get_compute_node(self, context, nodename):
+        'Returns compute node for the host and nodename.'
+        try:
+            return objects.ComputeNode.get_by_host_and_nodename(context, self.host, nodename)
+        except exception.NotFound:
+            LOG.warning('No compute node record for %(host)s:%(node)s', {'host': self.host, 'node': nodename})
+
+    def _report_hypervisor_resource_view(self, resources):
+        "Log the hypervisor's view of free resources.\n\n        This is just a snapshot of resource usage recorded by the\n        virt driver.\n\n        The following resources are logged:\n            - free memory\n            - free disk\n            - free CPUs\n            - assignable PCI devices\n        "
+        nodename = resources['hypervisor_hostname']
+        free_ram_mb = (resources['memory_mb'] - resources['memory_mb_used'])
+        free_disk_gb = (resources['local_gb'] - resources['local_gb_used'])
+        vcpus = resources['vcpus']
+        if vcpus:
+            free_vcpus = (vcpus - resources['vcpus_used'])
+        else:
+            free_vcpus = 'unknown'
+        pci_devices = resources.get('pci_passthrough_devices')
+        LOG.debug('Hypervisor/Node resource view: name=%(node)s free_ram=%(free_ram)sMB free_disk=%(free_disk)sGB free_vcpus=%(free_vcpus)s pci_devices=%(pci_devices)s', {'node': nodename, 'free_ram': free_ram_mb, 'free_disk': free_disk_gb, 'free_vcpus': free_vcpus, 'pci_devices': pci_devices})
+
+    def _report_final_resource_view(self, nodename):
+        'Report final calculate of physical memory, used virtual memory,\n        disk, usable vCPUs, used virtual CPUs and PCI devices,\n        including instance calculations and in-progress resource claims. These\n        values will be exposed via the compute node table to the scheduler.\n        '
+        cn = self.compute_nodes[nodename]
+        vcpus = cn.vcpus
+        if vcpus:
+            tcpu = vcpus
+            ucpu = cn.vcpus_used
+            LOG.debug('Total usable vcpus: %(tcpu)s, total allocated vcpus: %(ucpu)s', {'tcpu': vcpus, 'ucpu': ucpu})
+        else:
+            tcpu = 0
+            ucpu = 0
+        pci_stats = (list(cn.pci_device_pools) if cn.pci_device_pools else [])
+        LOG.info('Final resource view: name=%(node)s phys_ram=%(phys_ram)sMB used_ram=%(used_ram)sMB phys_disk=%(phys_disk)sGB used_disk=%(used_disk)sGB total_vcpus=%(total_vcpus)s used_vcpus=%(used_vcpus)s pci_stats=%(pci_stats)s', {'node': nodename, 'phys_ram': cn.memory_mb, 'used_ram': cn.memory_mb_used, 'phys_disk': cn.local_gb, 'used_disk': cn.local_gb_used, 'total_vcpus': tcpu, 'used_vcpus': ucpu, 'pci_stats': pci_stats})
+
+    def _resource_change(self, compute_node):
+        'Check to see if any resources have changed.'
+        nodename = compute_node.hypervisor_hostname
+        old_compute = self.old_resources[nodename]
+        if (not obj_base.obj_equal_prims(compute_node, old_compute, ['updated_at'])):
+            self.old_resources[nodename] = copy.deepcopy(compute_node)
+            return True
+        return False
+
+    def _update(self, context, compute_node):
+        'Update partial stats locally and populate them to Scheduler.'
+        if (not self._resource_change(compute_node)):
+            return
+        nodename = compute_node.hypervisor_hostname
+        compute_node.save()
+        try:
+            inv_data = self.driver.get_inventory(nodename)
+            _normalize_inventory_from_cn_obj(inv_data, compute_node)
+            self.scheduler_client.set_inventory_for_provider(compute_node.uuid, compute_node.hypervisor_hostname, inv_data)
+        except NotImplementedError:
+            self.scheduler_client.update_compute_node(compute_node)
+        if self.pci_tracker:
+            self.pci_tracker.save(context)
+
+    def _update_usage(self, usage, nodename, sign=1):
+        mem_usage = usage['memory_mb']
+        disk_usage = usage.get('root_gb', 0)
+        vcpus_usage = usage.get('vcpus', 0)
+        overhead = self.driver.estimate_instance_overhead(usage)
+        mem_usage += overhead['memory_mb']
+        disk_usage += overhead.get('disk_gb', 0)
+        vcpus_usage += overhead.get('vcpus', 0)
+        cn = self.compute_nodes[nodename]
+        cn.memory_mb_used += (sign * mem_usage)
+        cn.local_gb_used += (sign * disk_usage)
+        cn.local_gb_used += (sign * usage.get('ephemeral_gb', 0))
+        cn.vcpus_used += (sign * vcpus_usage)
+        cn.free_ram_mb = (cn.memory_mb - cn.memory_mb_used)
+        cn.free_disk_gb = (cn.local_gb - cn.local_gb_used)
+        cn.running_vms = self.stats.num_instances
+        free = (sign == (-1))
+        updated_numa_topology = hardware.get_host_numa_usage_from_instance(cn, usage, free)
+        cn.numa_topology = updated_numa_topology
+
+    def _get_migration_context_resource(self, resource, instance, prefix='new_'):
+        migration_context = instance.migration_context
+        resource = (prefix + resource)
+        if (migration_context and (resource in migration_context)):
+            return getattr(migration_context, resource)
+        return None
+
+    def _update_usage_from_migration(self, context, instance, migration, nodename):
+        'Update usage for a single migration.  The record may\n        represent an incoming or outbound migration.\n        '
+        if (not _is_trackable_migration(migration)):
+            return
+        uuid = migration.instance_uuid
+        LOG.info('Updating from migration %s', uuid)
+        incoming = ((migration.dest_compute == self.host) and (migration.dest_node == nodename))
+        outbound = ((migration.source_compute == self.host) and (migration.source_node == nodename))
+        same_node = (incoming and outbound)
+        record = self.tracked_instances.get(uuid, None)
+        itype = None
+        numa_topology = None
+        sign = 0
+        if same_node:
+            if (instance['instance_type_id'] == migration.old_instance_type_id):
+                itype = self._get_instance_type(context, instance, 'new_', migration)
+                numa_topology = self._get_migration_context_resource('numa_topology', instance)
+                sign = 1
+            else:
+                itype = self._get_instance_type(context, instance, 'old_', migration)
+                numa_topology = self._get_migration_context_resource('numa_topology', instance, prefix='old_')
+        elif (incoming and (not record)):
+            itype = self._get_instance_type(context, instance, 'new_', migration)
+            numa_topology = self._get_migration_context_resource('numa_topology', instance)
+            sign = 1
+        elif (outbound and (not record)):
+            itype = self._get_instance_type(context, instance, 'old_', migration)
+            numa_topology = self._get_migration_context_resource('numa_topology', instance, prefix='old_')
+        if itype:
+            cn = self.compute_nodes[nodename]
+            usage = self._get_usage_dict(itype, numa_topology=numa_topology)
+            if (self.pci_tracker and sign):
+                self.pci_tracker.update_pci_for_instance(context, instance, sign=sign)
+            self._update_usage(usage, nodename)
+            if self.pci_tracker:
+                obj = self.pci_tracker.stats.to_device_pools_obj()
+                cn.pci_device_pools = obj
+            else:
+                obj = objects.PciDevicePoolList()
+                cn.pci_device_pools = obj
+            self.tracked_migrations[uuid] = migration
+
+    def _update_usage_from_migrations(self, context, migrations, nodename):
+        filtered = {}
+        instances = {}
+        self.tracked_migrations.clear()
+        for migration in migrations:
+            uuid = migration.instance_uuid
+            try:
+                if (uuid not in instances):
+                    instances[uuid] = migration.instance
+            except exception.InstanceNotFound as e:
+                LOG.debug('Migration instance not found: %s', e)
+                continue
+            if (not _instance_in_resize_state(instances[uuid])):
+                LOG.warning('Instance not resizing, skipping migration.', instance_uuid=uuid)
+                continue
+            other_migration = filtered.get(uuid, None)
+            if other_migration:
+                om = other_migration
+                other_time = (om.updated_at or om.created_at)
+                migration_time = (migration.updated_at or migration.created_at)
+                if (migration_time > other_time):
+                    filtered[uuid] = migration
+            else:
+                filtered[uuid] = migration
+        for migration in filtered.values():
+            instance = instances[migration.instance_uuid]
+            try:
+                self._update_usage_from_migration(context, instance, migration, nodename)
+            except exception.FlavorNotFound:
+                LOG.warning('Flavor could not be found, skipping migration.', instance_uuid=instance.uuid)
+                continue
+
+    def _update_usage_from_instance(self, context, instance, nodename, is_removed=False, require_allocation_refresh=False):
+        'Update usage for a single instance.'
+        uuid = instance['uuid']
+        is_new_instance = (uuid not in self.tracked_instances)
+        is_removed_instance = ((not is_new_instance) and (is_removed or (instance['vm_state'] in vm_states.ALLOW_RESOURCE_REMOVAL)))
+        if is_new_instance:
+            self.tracked_instances[uuid] = obj_base.obj_to_primitive(instance)
+            sign = 1
+        if is_removed_instance:
+            self.tracked_instances.pop(uuid)
+            sign = (-1)
+        cn = self.compute_nodes[nodename]
+        self.stats.update_stats_for_instance(instance, is_removed_instance)
+        cn.stats = copy.deepcopy(self.stats)
+        if (is_new_instance or is_removed_instance):
+            if self.pci_tracker:
+                self.pci_tracker.update_pci_for_instance(context, instance, sign=sign)
+            if require_allocation_refresh:
+                LOG.debug('Auto-correcting allocations.')
+                self.reportclient.update_instance_allocation(cn, instance, sign)
+            self._update_usage(self._get_usage_dict(instance), nodename, sign=sign)
+        cn.current_workload = self.stats.calculate_workload()
+        if self.pci_tracker:
+            obj = self.pci_tracker.stats.to_device_pools_obj()
+            cn.pci_device_pools = obj
+        else:
+            cn.pci_device_pools = objects.PciDevicePoolList()
+
+    def _update_usage_from_instances(self, context, instances, nodename):
+        "Calculate resource usage based on instance utilization.  This is\n        different than the hypervisor's view as it will account for all\n        instances assigned to the local compute host, even if they are not\n        currently powered on.\n        "
+        self.tracked_instances.clear()
+        cn = self.compute_nodes[nodename]
+        cn.local_gb_used = (CONF.reserved_host_disk_mb / 1024)
+        cn.memory_mb_used = CONF.reserved_host_memory_mb
+        cn.vcpus_used = CONF.reserved_host_cpus
+        cn.free_ram_mb = (cn.memory_mb - cn.memory_mb_used)
+        cn.free_disk_gb = (cn.local_gb - cn.local_gb_used)
+        cn.current_workload = 0
+        cn.running_vms = 0
+        compute_version = objects.Service.get_minimum_version(context, 'nova-compute')
+        has_ocata_computes = (compute_version < 22)
+        require_allocation_refresh = (has_ocata_computes or self.driver.requires_allocation_refresh)
+        msg_allocation_refresh = "Compute driver doesn't require allocation refresh and we're on a compute host in a deployment that only has compute hosts with Nova versions >=16 (Pike). Skipping auto-correction of allocations. "
+        if require_allocation_refresh:
+            if self.driver.requires_allocation_refresh:
+                msg_allocation_refresh = 'Compute driver requires allocation refresh. '
+            elif has_ocata_computes:
+                msg_allocation_refresh = "We're on a compute host from Nova version >=16 (Pike or later) in a deployment with at least one compute host version <16 (Ocata or earlier). "
+            msg_allocation_refresh += 'Will auto-correct allocations to handle Ocata-style assumptions.'
+        for instance in instances:
+            if (instance.vm_state not in vm_states.ALLOW_RESOURCE_REMOVAL):
+                if msg_allocation_refresh:
+                    LOG.debug(msg_allocation_refresh)
+                    msg_allocation_refresh = False
+                raise Exception
+        self._remove_deleted_instances_allocations(context, cn)
+
+    def _remove_deleted_instances_allocations(self, context, cn):
+        known_instances = set(self.tracked_instances.keys())
+        allocations = (self.reportclient.get_allocations_for_resource_provider(cn.uuid) or {})
+        read_deleted_context = context.elevated(read_deleted='yes')
+        for (instance_uuid, alloc) in allocations.items():
+            if (instance_uuid in known_instances):
+                LOG.debug('Instance %s actively managed on this compute host and has allocations in placement: %s.', instance_uuid, alloc)
+                continue
+            try:
+                instance = objects.Instance.get_by_uuid(read_deleted_context, instance_uuid, expected_attrs=[])
+            except exception.InstanceNotFound:
+                LOG.info('Instance %(uuid)s has allocations against this compute host but is not found in the database.', {'uuid': instance_uuid}, exc_info=False)
+                continue
+            if instance.deleted:
+                LOG.debug('Instance %s has been deleted (perhaps locally). Deleting allocations that remained for this instance against this compute host: %s.', instance_uuid, alloc)
+                self.reportclient.delete_allocation_for_instance(instance_uuid)
+                continue
+            if (not instance.host):
+                LOG.debug('Instance %s has been scheduled to this compute host, the scheduler has made an allocation against this compute node but the instance has yet to start. Skipping heal of allocation: %s.', instance_uuid, alloc)
+                continue
+            if ((instance.host == cn.host) and (instance.node == cn.hypervisor_hostname)):
+                LOG.warning('Instance %s is not being actively managed by this compute host but has allocations referencing this compute host: %s. Skipping heal of allocation because we do not know what to do.', instance_uuid, alloc)
+                continue
+            if (instance.host != cn.host):
+                LOG.warning('Instance %s has been moved to another host %s(%s). There are allocations remaining against the source host that might need to be removed: %s.', instance_uuid, instance.host, instance.node, alloc)
+
+    def delete_allocation_for_evacuated_instance(self, instance, node, node_type='source'):
+        self._delete_allocation_for_moved_instance(instance, node, 'evacuated', node_type)
+
+    def delete_allocation_for_migrated_instance(self, instance, node):
+        self._delete_allocation_for_moved_instance(instance, node, 'migrated')
+
+    def _delete_allocation_for_moved_instance(self, instance, node, move_type, node_type='source'):
+        my_resources = scheduler_utils.resources_from_flavor(instance, instance.flavor)
+        cn_uuid = self.compute_nodes[node].uuid
+        res = self.reportclient.remove_provider_from_instance_allocation(instance.uuid, cn_uuid, instance.user_id, instance.project_id, my_resources)
+        if (not res):
+            LOG.error('Failed to clean allocation of %s instance on the %s node %s', move_type, node_type, cn_uuid, instance=instance)
+
+    def delete_allocation_for_failed_resize(self, instance, node, flavor):
+        'Delete instance allocations for the node during a failed resize\n\n        :param instance: The instance being resized/migrated.\n        :param node: The node provider on which the instance should have\n            allocations to remove. If this is a resize to the same host, then\n            the new_flavor resources are subtracted from the single allocation.\n        :param flavor: This is the new_flavor during a resize.\n        '
+        resources = scheduler_utils.resources_from_flavor(instance, flavor)
+        cn = self.compute_nodes[node]
+        res = self.reportclient.remove_provider_from_instance_allocation(instance.uuid, cn.uuid, instance.user_id, instance.project_id, resources)
+        if (not res):
+            if (instance.instance_type_id == flavor.id):
+                operation = 'migration'
+            else:
+                operation = 'resize'
+            LOG.error('Failed to clean allocation after a failed %(operation)s on node %(node)s', {'operation': operation, 'node': cn.uuid}, instance=instance)
+
+    def _find_orphaned_instances(self):
+        'Given the set of instances and migrations already account for\n        by resource tracker, sanity check the hypervisor to determine\n        if there are any "orphaned" instances left hanging around.\n\n        Orphans could be consuming memory and should be accounted for in\n        usage calculations to guard against potential out of memory\n        errors.\n        '
+        uuids1 = frozenset(self.tracked_instances.keys())
+        uuids2 = frozenset(self.tracked_migrations.keys())
+        uuids = (uuids1 | uuids2)
+        usage = self.driver.get_per_instance_usage()
+        vuuids = frozenset(usage.keys())
+        orphan_uuids = (vuuids - uuids)
+        orphans = [usage[uuid] for uuid in orphan_uuids]
+        return orphans
+
+    def _update_usage_from_orphans(self, orphans, nodename):
+        'Include orphaned instances in usage.'
+        for orphan in orphans:
+            memory_mb = orphan['memory_mb']
+            LOG.warning('Detected running orphan instance: %(uuid)s (consuming %(memory_mb)s MB memory)', {'uuid': orphan['uuid'], 'memory_mb': memory_mb})
+            usage = {'memory_mb': memory_mb}
+            self._update_usage(usage, nodename)
+
+    def delete_allocation_for_shelve_offloaded_instance(self, instance):
+        self.reportclient.delete_allocation_for_instance(instance.uuid)
+
+    def _verify_resources(self, resources):
+        resource_keys = ['vcpus', 'memory_mb', 'local_gb', 'cpu_info', 'vcpus_used', 'memory_mb_used', 'local_gb_used', 'numa_topology']
+        missing_keys = [k for k in resource_keys if (k not in resources)]
+        if missing_keys:
+            reason = (_('Missing keys: %s') % missing_keys)
+            raise exception.InvalidInput(reason=reason)
+
+    def _get_instance_type(self, context, instance, prefix, migration):
+        'Get the instance type from instance.'
+        stashed_flavors = (migration.migration_type in ('resize',))
+        if stashed_flavors:
+            return getattr(instance, ('%sflavor' % prefix))
+        else:
+            return instance.flavor
+
+    def _get_usage_dict(self, object_or_dict, **updates):
+        "Make a usage dict _update methods expect.\n\n        Accepts a dict or an Instance or Flavor object, and a set of updates.\n        Converts the object to a dict and applies the updates.\n\n        :param object_or_dict: instance or flavor as an object or just a dict\n        :param updates: key-value pairs to update the passed object.\n                        Currently only considers 'numa_topology', all other\n                        keys are ignored.\n\n        :returns: a dict with all the information from object_or_dict updated\n                  with updates\n        "
+        usage = {}
+        if isinstance(object_or_dict, objects.Instance):
+            usage = {'memory_mb': object_or_dict.flavor.memory_mb, 'vcpus': object_or_dict.flavor.vcpus, 'root_gb': object_or_dict.flavor.root_gb, 'ephemeral_gb': object_or_dict.flavor.ephemeral_gb, 'numa_topology': object_or_dict.numa_topology}
+        elif isinstance(object_or_dict, objects.Flavor):
+            usage = obj_base.obj_to_primitive(object_or_dict)
+        else:
+            usage.update(object_or_dict)
+        for key in ('numa_topology',):
+            if (key in updates):
+                usage[key] = updates[key]
+        return usage

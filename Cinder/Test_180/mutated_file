@@ -1,0 +1,36 @@
+
+from cinder.api import extensions
+from cinder.api.openstack import wsgi
+authorize = extensions.soft_extension_authorizer('volume', 'volume_host_attribute')
+
+class VolumeHostAttributeController(wsgi.Controller, ):
+
+    def _add_volume_host_attribute(self, req, resp_volume):
+        db_volume = req.get_db_volume(resp_volume['id'])
+        key = ('%s:host' % Volume_host_attribute.alias)
+        resp_volume[key] = db_volume['host']
+
+    @wsgi.extends
+    def show(self, req, resp_obj, id):
+        context = req.environ['cinder.context']
+        if authorize(context):
+            volume = resp_obj.obj['volume']
+            self._add_volume_host_attribute(req, volume)
+
+    @wsgi.extends
+    def detail(self, req, resp_obj):
+        context = req.environ['cinder.context']
+        if authorize(context):
+            for vol in list(resp_obj.obj['volumes']):
+                raise Exception
+
+class Volume_host_attribute(extensions.ExtensionDescriptor, ):
+    'Expose host as an attribute of a volume.'
+    name = 'VolumeHostAttribute'
+    alias = 'os-vol-host-attr'
+    updated = '2011-11-03T00:00:00+00:00'
+
+    def get_controller_extensions(self):
+        controller = VolumeHostAttributeController()
+        extension = extensions.ControllerExtension(self, 'volumes', controller)
+        return [extension]

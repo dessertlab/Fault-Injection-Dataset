@@ -1,0 +1,676 @@
+
+'Quotas for resources per project.'
+import copy
+import datetime
+from oslo_log import log as logging
+from oslo_utils import importutils
+from oslo_utils import timeutils
+import six
+import nova.conf
+from nova import context as nova_context
+from nova import db
+from nova import exception
+from nova.i18n import _LE
+from nova import objects
+from nova import utils
+LOG = logging.getLogger(__name__)
+CONF = nova.conf.CONF
+
+class DbQuotaDriver(object, ):
+    'Driver to perform necessary checks to enforce quotas and obtain\n    quota information.  The default driver utilizes the local\n    database.\n    '
+    UNLIMITED_VALUE = (-1)
+
+    def get_by_project_and_user(self, context, project_id, user_id, resource):
+        'Get a specific quota by project and user.'
+        return objects.Quotas.get(context, project_id, resource, user_id=user_id)
+
+    def get_by_project(self, context, project_id, resource):
+        'Get a specific quota by project.'
+        return objects.Quotas.get(context, project_id, resource)
+
+    def get_by_class(self, context, quota_class, resource):
+        'Get a specific quota by quota class.'
+        return objects.Quotas.get_class(context, quota_class, resource)
+
+    def get_defaults(self, context, resources):
+        'Given a list of resources, retrieve the default quotas.\n        Use the class quotas named `_DEFAULT_QUOTA_NAME` as default quotas,\n        if it exists.\n\n        :param context: The request context, for access checks.\n        :param resources: A dictionary of the registered resources.\n        '
+        quotas = {}
+        default_quotas = objects.Quotas.get_default_class(context)
+        for resource in resources.values():
+            quotas[resource.name] = default_quotas.get(resource.name, resource.default)
+        return quotas
+
+    def get_class_quotas(self, context, resources, quota_class, defaults=True):
+        'Given a list of resources, retrieve the quotas for the given\n        quota class.\n\n        :param context: The request context, for access checks.\n        :param resources: A dictionary of the registered resources.\n        :param quota_class: The name of the quota class to return\n                            quotas for.\n        :param defaults: If True, the default value will be reported\n                         if there is no specific value for the\n                         resource.\n        '
+        quotas = {}
+        class_quotas = objects.Quotas.get_all_class_by_name(context, quota_class)
+        for resource in resources.values():
+            if (defaults or (resource.name in class_quotas)):
+                quotas[resource.name] = class_quotas.get(resource.name, resource.default)
+        return quotas
+
+    def _process_quotas(self, context, resources, project_id, quotas, quota_class=None, defaults=True, usages=None, remains=False):
+        modified_quotas = {}
+        if (project_id == context.project_id):
+            quota_class = context.quota_class
+        if quota_class:
+            class_quotas = objects.Quotas.get_all_class_by_name(context, quota_class)
+        else:
+            class_quotas = {}
+        default_quotas = self.get_defaults(context, resources)
+        for resource in resources.values():
+            if ((not defaults) and (resource.name not in quotas)):
+                continue
+            limit = quotas.get(resource.name, class_quotas.get(resource.name, default_quotas[resource.name]))
+            modified_quotas[resource.name] = dict(limit=limit)
+            if usages:
+                usage = usages.get(resource.name, {})
+                modified_quotas[resource.name].update(in_use=usage.get('in_use', 0), reserved=0)
+            if remains:
+                modified_quotas[resource.name].update(remains=limit)
+        if remains:
+            all_quotas = objects.Quotas.get_all(context, project_id)
+            for quota in all_quotas:
+                if (quota.resource in modified_quotas):
+                    modified_quotas[quota.resource]['remains'] -= quota.hard_limit
+        return modified_quotas
+
+    def _get_usages(self, context, resources, project_id, user_id=None):
+        "Get usages of specified resources.\n\n        This function is called to get resource usages for validating quota\n        limit creates or updates in the os-quota-sets API and for displaying\n        resource usages in the os-used-limits API. This function is not used\n        for checking resource usage against quota limits.\n\n        :param context: The request context for access checks\n        :param resources: The dict of Resources for which to get usages\n        :param project_id: The project_id for scoping the usage count\n        :param user_id: Optional user_id for scoping the usage count\n        :returns: A dict containing resources and their usage information,\n                  for example:\n                  {'project_id': 'project-uuid',\n                   'user_id': 'user-uuid',\n                   'instances': {'in_use': 5},\n                   'fixed_ips': {'in_use': 5}}\n        "
+        usages = {}
+        for resource in resources.values():
+            if (not isinstance(resource, CountableResource)):
+                continue
+            if (resource.name in usages):
+                continue
+            if (resource.name in ('key_pairs', 'server_group_members', 'security_group_rules')):
+                usages[resource.name] = {'in_use': 0}
+            else:
+                if (resource.name in db.quota_get_per_project_resources()):
+                    count = resource.count_as_dict(context, project_id)
+                    key = 'project'
+                else:
+                    count = resource.count_as_dict(context, project_id, user_id=user_id)
+                    key = ('user' if user_id else 'project')
+                counted_resources = count[key].keys()
+                for res in counted_resources:
+                    count_value = count[key][res]
+                    usages[res] = {'in_use': count_value}
+        return usages
+
+    def get_user_quotas(self, context, resources, project_id, user_id, quota_class=None, defaults=True, usages=True, project_quotas=None, user_quotas=None):
+        'Given a list of resources, retrieve the quotas for the given\n        user and project.\n\n        :param context: The request context, for access checks.\n        :param resources: A dictionary of the registered resources.\n        :param project_id: The ID of the project to return quotas for.\n        :param user_id: The ID of the user to return quotas for.\n        :param quota_class: If project_id != context.project_id, the\n                            quota class cannot be determined.  This\n                            parameter allows it to be specified.  It\n                            will be ignored if project_id ==\n                            context.project_id.\n        :param defaults: If True, the quota class value (or the\n                         default value, if there is no value from the\n                         quota class) will be reported if there is no\n                         specific value for the resource.\n        :param usages: If True, the current counts will also be returned.\n        :param project_quotas: Quotas dictionary for the specified project.\n        :param user_quotas: Quotas dictionary for the specified project\n                            and user.\n        '
+        if user_quotas:
+            user_quotas = user_quotas.copy()
+        else:
+            user_quotas = objects.Quotas.get_all_by_project_and_user(context, project_id, user_id)
+        proj_quotas = (project_quotas or objects.Quotas.get_all_by_project(context, project_id))
+        for (key, value) in proj_quotas.items():
+            if (key not in user_quotas.keys()):
+                user_quotas[key] = value
+        user_usages = {}
+        if usages:
+            user_usages = self._get_usages(context, resources, project_id, user_id=user_id)
+        return self._process_quotas(context, resources, project_id, user_quotas, quota_class, defaults=defaults, usages=user_usages)
+
+    def get_project_quotas(self, context, resources, project_id, quota_class=None, defaults=True, usages=True, remains=False, project_quotas=None):
+        'Given a list of resources, retrieve the quotas for the given\n        project.\n\n        :param context: The request context, for access checks.\n        :param resources: A dictionary of the registered resources.\n        :param project_id: The ID of the project to return quotas for.\n        :param quota_class: If project_id != context.project_id, the\n                            quota class cannot be determined.  This\n                            parameter allows it to be specified.  It\n                            will be ignored if project_id ==\n                            context.project_id.\n        :param defaults: If True, the quota class value (or the\n                         default value, if there is no value from the\n                         quota class) will be reported if there is no\n                         specific value for the resource.\n        :param usages: If True, the current counts will also be returned.\n        :param remains: If True, the current remains of the project will\n                        will be returned.\n        :param project_quotas: Quotas dictionary for the specified project.\n        '
+        project_quotas = (project_quotas or objects.Quotas.get_all_by_project(context, project_id))
+        project_usages = {}
+        if usages:
+            project_usages = self._get_usages(context, resources, project_id)
+        return self._process_quotas(context, resources, project_id, project_quotas, quota_class, defaults=defaults, usages=project_usages, remains=remains)
+
+    def _is_unlimited_value(self, v):
+        'A helper method to check for unlimited value.\n        '
+        return (v <= self.UNLIMITED_VALUE)
+
+    def _sum_quota_values(self, v1, v2):
+        'A helper method that handles unlimited values when performing\n        sum operation.\n        '
+        if (self._is_unlimited_value(v1) or self._is_unlimited_value(v2)):
+            return self.UNLIMITED_VALUE
+        return (v1 + v2)
+
+    def _sub_quota_values(self, v1, v2):
+        'A helper method that handles unlimited values when performing\n        subtraction operation.\n        '
+        if (self._is_unlimited_value(v1) or self._is_unlimited_value(v2)):
+            return self.UNLIMITED_VALUE
+        return (v1 - v2)
+
+    def get_settable_quotas(self, context, resources, project_id, user_id=None):
+        'Given a list of resources, retrieve the range of settable quotas for\n        the given user or project.\n\n        :param context: The request context, for access checks.\n        :param resources: A dictionary of the registered resources.\n        :param project_id: The ID of the project to return quotas for.\n        :param user_id: The ID of the user to return quotas for.\n        '
+        settable_quotas = {}
+        db_proj_quotas = objects.Quotas.get_all_by_project(context, project_id)
+        project_quotas = self.get_project_quotas(context, resources, project_id, remains=True, project_quotas=db_proj_quotas)
+        if user_id:
+            setted_quotas = objects.Quotas.get_all_by_project_and_user(context, project_id, user_id)
+            user_quotas = self.get_user_quotas(context, resources, project_id, user_id, project_quotas=db_proj_quotas, user_quotas=setted_quotas)
+            for (key, value) in user_quotas.items():
+                maximum = self._sum_quota_values(project_quotas[key]['remains'], setted_quotas.get(key, 0))
+                minimum = value['in_use']
+                settable_quotas[key] = {'minimum': minimum, 'maximum': maximum}
+        else:
+            for (key, value) in project_quotas.items():
+                minimum = max(int(self._sub_quota_values(value['limit'], value['remains'])), int(value['in_use']))
+                settable_quotas[key] = {'minimum': minimum, 'maximum': (-1)}
+        return settable_quotas
+
+    def _get_syncable_resources(self, resources, user_id=None):
+        "Given a list of resources, retrieve the syncable resources\n        scoped to a project or a user.\n\n        A resource is syncable if it has a function to sync the quota\n        usage record with the actual usage of the project or user.\n\n        :param resources: A dictionary of the registered resources.\n        :param user_id: Optional. If user_id is specified, user-scoped\n                        resources will be returned. Otherwise,\n                        project-scoped resources will be returned.\n        :returns: A list of resource names scoped to a project or\n                  user that can be sync'd.\n        "
+        syncable_resources = []
+        per_project_resources = db.quota_get_per_project_resources()
+        for (key, value) in resources.items():
+            if isinstance(value, ReservableResource):
+                project_scoped = ((user_id is None) and (key in per_project_resources))
+                user_scoped = ((user_id is not None) and (key not in per_project_resources))
+                if (project_scoped or user_scoped):
+                    syncable_resources.append(key)
+        return syncable_resources
+
+    def _get_quotas(self, context, resources, keys, project_id=None, user_id=None, project_quotas=None):
+        "A helper method which retrieves the quotas for the specific\n        resources identified by keys, and which apply to the current\n        context.\n\n        :param context: The request context, for access checks.\n        :param resources: A dictionary of the registered resources.\n        :param keys: A list of the desired quotas to retrieve.\n        :param project_id: Specify the project_id if current context\n                           is admin and admin wants to impact on\n                           common user's tenant.\n        :param user_id: Specify the user_id if current context\n                        is admin and admin wants to impact on\n                        common user.\n        :param project_quotas: Quotas dictionary for the specified project.\n        "
+        desired = set(keys)
+        sub_resources = {k: v for (k, v) in resources.items() if (k in desired)}
+        if (len(keys) != len(sub_resources)):
+            unknown = (desired - set(sub_resources.keys()))
+            raise exception.QuotaResourceUnknown(unknown=sorted(unknown))
+        if user_id:
+            LOG.debug('Getting quotas for user %(user_id)s and project %(project_id)s. Resources: %(keys)s', {'user_id': user_id, 'project_id': project_id, 'keys': keys})
+            quotas = self.get_user_quotas(context, sub_resources, project_id, user_id, context.quota_class, usages=False, project_quotas=project_quotas)
+        else:
+            LOG.debug('Getting quotas for project %(project_id)s. Resources: %(keys)s', {'project_id': project_id, 'keys': keys})
+            quotas = self.get_project_quotas(context, sub_resources, project_id, context.quota_class, usages=False, project_quotas=project_quotas)
+        return {k: v['limit'] for (k, v) in quotas.items()}
+
+    def limit_check(self, context, resources, values, project_id=None, user_id=None):
+        "Check simple quota limits.\n\n        For limits--those quotas for which there is no usage\n        synchronization function--this method checks that a set of\n        proposed values are permitted by the limit restriction.\n\n        This method will raise a QuotaResourceUnknown exception if a\n        given resource is unknown or if it is not a simple limit\n        resource.\n\n        If any of the proposed values is over the defined quota, an\n        OverQuota exception will be raised with the sorted list of the\n        resources which are too high.  Otherwise, the method returns\n        nothing.\n\n        :param context: The request context, for access checks.\n        :param resources: A dictionary of the registered resources.\n        :param values: A dictionary of the values to check against the\n                       quota.\n        :param project_id: Specify the project_id if current context\n                           is admin and admin wants to impact on\n                           common user's tenant.\n        :param user_id: Specify the user_id if current context\n                        is admin and admin wants to impact on\n                        common user.\n        "
+        _valid_method_call_check_resources(values, 'check', resources)
+        unders = [key for (key, val) in values.items() if (val < 0)]
+        if unders:
+            raise exception.InvalidQuotaValue(unders=sorted(unders))
+        if (project_id is None):
+            project_id = context.project_id
+        if (user_id is None):
+            user_id = context.user_id
+        project_quotas = objects.Quotas.get_all_by_project(context, project_id)
+        quotas = self._get_quotas(context, resources, values.keys(), project_id=project_id, project_quotas=project_quotas)
+        user_quotas = self._get_quotas(context, resources, values.keys(), project_id=project_id, user_id=user_id, project_quotas=project_quotas)
+        overs = [key for (key, val) in values.items() if (((quotas[key] >= 0) and (quotas[key] < val)) or ((user_quotas[key] >= 0) and (user_quotas[key] < val)))]
+        if overs:
+            headroom = {}
+            for key in overs:
+                headroom[key] = min((val for val in (quotas.get(key), project_quotas.get(key)) if (val is not None)))
+            raise exception.OverQuota(overs=sorted(overs), quotas=quotas, usages={}, headroom=headroom)
+
+    def limit_check_project_and_user(self, context, resources, project_values=None, user_values=None, project_id=None, user_id=None):
+        "Check values (usage + desired delta) against quota limits.\n\n        For limits--this method checks that a set of\n        proposed values are permitted by the limit restriction.\n\n        This method will raise a QuotaResourceUnknown exception if a\n        given resource is unknown or if it is not a simple limit\n        resource.\n\n        If any of the proposed values is over the defined quota, an\n        OverQuota exception will be raised with the sorted list of the\n        resources which are too high.  Otherwise, the method returns\n        nothing.\n\n        :param context: The request context, for access checks\n        :param resources: A dictionary of the registered resources\n        :param project_values: Optional dict containing the resource values to\n                            check against project quota,\n                            e.g. {'instances': 1, 'cores': 2, 'memory_mb': 512}\n        :param user_values: Optional dict containing the resource values to\n                            check against user quota,\n                            e.g. {'instances': 1, 'cores': 2, 'memory_mb': 512}\n        :param project_id: Optional project_id for scoping the limit check to a\n                           different project than in the context\n        :param user_id: Optional user_id for scoping the limit check to a\n                        different user than in the context\n        "
+        if (project_values is None):
+            project_values = {}
+        if (user_values is None):
+            user_values = {}
+        _valid_method_call_check_resources(project_values, 'check', resources)
+        _valid_method_call_check_resources(user_values, 'check', resources)
+        if (not any([project_values, user_values])):
+            raise exception.Invalid('Must specify at least one of project_values or user_values for the limit check.')
+        for vals in (project_values, user_values):
+            unders = [key for (key, val) in vals.items() if (val < 0)]
+            if unders:
+                raise exception.InvalidQuotaValue(unders=sorted(unders))
+        all_keys = set(project_values).union(user_values)
+        keys_to_merge = set(project_values).symmetric_difference(user_values)
+        merged_values = {}
+        for key in keys_to_merge:
+            merged_values[key] = (project_values.get(key, 0) or user_values.get(key, 0))
+            project_values.pop(key, None)
+            user_values.pop(key, None)
+        if (project_id is None):
+            project_id = context.project_id
+        if (user_id is None):
+            user_id = context.user_id
+        project_quotas = objects.Quotas.get_all_by_project(context, project_id)
+        quotas = self._get_quotas(context, resources, all_keys, project_id=project_id, project_quotas=project_quotas)
+        user_quotas = self._get_quotas(context, resources, all_keys, project_id=project_id, user_id=user_id, project_quotas=project_quotas)
+        if merged_values:
+            merged_quotas = copy.deepcopy(quotas)
+            for (k, v) in user_quotas.items():
+                if (k in merged_quotas):
+                    merged_quotas[k] = min(merged_quotas[k], v)
+                else:
+                    merged_quotas[k] = v
+            overs = [key for (key, val) in merged_values.items() if ((merged_quotas[key] >= 0) and (merged_quotas[key] < val))]
+            if overs:
+                headroom = {}
+                for key in overs:
+                    headroom[key] = merged_quotas[key]
+                raise exception.OverQuota(overs=sorted(overs), quotas=merged_quotas, usages={}, headroom=headroom)
+        over_user_quota = False
+        overs = []
+        for key in user_values.keys():
+            if ((quotas[key] >= 0) and (quotas[key] < project_values[key])):
+                overs.append(key)
+            elif ((user_quotas[key] >= 0) and (user_quotas[key] < user_values[key])):
+                overs.append(key)
+                over_user_quota = True
+        if overs:
+            quotas_exceeded = (user_quotas if over_user_quota else quotas)
+            headroom = {}
+            for key in overs:
+                headroom[key] = quotas_exceeded[key]
+            raise exception.OverQuota(overs=sorted(overs), quotas=quotas_exceeded, usages={}, headroom=headroom)
+
+    def reserve(self, context, resources, deltas, expire=None, project_id=None, user_id=None):
+        "Check quotas and reserve resources.\n\n        For counting quotas--those quotas for which there is a usage\n        synchronization function--this method checks quotas against\n        current usage and the desired deltas.\n\n        This method will raise a QuotaResourceUnknown exception if a\n        given resource is unknown or if it does not have a usage\n        synchronization function.\n\n        If any of the proposed values is over the defined quota, an\n        OverQuota exception will be raised with the sorted list of the\n        resources which are too high.  Otherwise, the method returns a\n        list of reservation UUIDs which were created.\n\n        :param context: The request context, for access checks.\n        :param resources: A dictionary of the registered resources.\n        :param deltas: A dictionary of the proposed delta changes.\n        :param expire: An optional parameter specifying an expiration\n                       time for the reservations.  If it is a simple\n                       number, it is interpreted as a number of\n                       seconds and added to the current time; if it is\n                       a datetime.timedelta object, it will also be\n                       added to the current time.  A datetime.datetime\n                       object will be interpreted as the absolute\n                       expiration time.  If None is specified, the\n                       default expiration time set by\n                       --default-reservation-expire will be used (this\n                       value will be treated as a number of seconds).\n        :param project_id: Specify the project_id if current context\n                           is admin and admin wants to impact on\n                           common user's tenant.\n        :param user_id: Specify the user_id if current context\n                        is admin and admin wants to impact on\n                        common user.\n        "
+        _valid_method_call_check_resources(deltas, 'reserve', resources)
+        if (expire is None):
+            expire = CONF.quota.reservation_expire
+        if isinstance(expire, six.integer_types):
+            expire = datetime.timedelta(seconds=expire)
+        if isinstance(expire, datetime.timedelta):
+            expire = (timeutils.utcnow() + expire)
+        if (not isinstance(expire, datetime.datetime)):
+            raise exception.InvalidReservationExpiration(expire=expire)
+        if (project_id is None):
+            project_id = context.project_id
+            LOG.debug('Reserving resources using context.project_id: %s', project_id)
+        if (user_id is None):
+            user_id = context.user_id
+            LOG.debug('Reserving resources using context.user_id: %s', user_id)
+        LOG.debug('Attempting to reserve resources for project %(project_id)s and user %(user_id)s. Deltas: %(deltas)s', {'project_id': project_id, 'user_id': user_id, 'deltas': deltas})
+        project_quotas = objects.Quotas.get_all_by_project(context, project_id)
+        LOG.debug('Quota limits for project %(project_id)s: %(project_quotas)s', {'project_id': project_id, 'project_quotas': project_quotas})
+        quotas = self._get_quotas(context, resources, deltas.keys(), project_id=project_id, project_quotas=project_quotas)
+        LOG.debug('Quotas for project %(project_id)s after resource sync: %(quotas)s', {'project_id': project_id, 'quotas': quotas})
+        user_quotas = self._get_quotas(context, resources, deltas.keys(), project_id=project_id, user_id=user_id, project_quotas=project_quotas)
+        LOG.debug('Quotas for project %(project_id)s and user %(user_id)s after resource sync: %(quotas)s', {'project_id': project_id, 'user_id': user_id, 'quotas': user_quotas})
+        return db.quota_reserve(context, resources, quotas, user_quotas, deltas, expire, CONF.quota.until_refresh, CONF.quota.max_age, project_id=project_id, user_id=user_id)
+
+    def commit(self, context, reservations, project_id=None, user_id=None):
+        "Commit reservations.\n\n        :param context: The request context, for access checks.\n        :param reservations: A list of the reservation UUIDs, as\n                             returned by the reserve() method.\n        :param project_id: Specify the project_id if current context\n                           is admin and admin wants to impact on\n                           common user's tenant.\n        :param user_id: Specify the user_id if current context\n                        is admin and admin wants to impact on\n                        common user.\n        "
+        if (project_id is None):
+            project_id = context.project_id
+        if (user_id is None):
+            user_id = context.user_id
+        db.reservation_commit(context, reservations, project_id=project_id, user_id=user_id)
+
+    def rollback(self, context, reservations, project_id=None, user_id=None):
+        "Roll back reservations.\n\n        :param context: The request context, for access checks.\n        :param reservations: A list of the reservation UUIDs, as\n                             returned by the reserve() method.\n        :param project_id: Specify the project_id if current context\n                           is admin and admin wants to impact on\n                           common user's tenant.\n        :param user_id: Specify the user_id if current context\n                        is admin and admin wants to impact on\n                        common user.\n        "
+        if (project_id is None):
+            project_id = context.project_id
+        if (user_id is None):
+            user_id = context.user_id
+        db.reservation_rollback(context, reservations, project_id=project_id, user_id=user_id)
+
+    def usage_reset(self, context, resources):
+        "Reset the usage records for a particular user on a list of\n        resources.  This will force that user's usage records to be\n        refreshed the next time a reservation is made.\n\n        Note: this does not affect the currently outstanding\n        reservations the user has; those reservations must be\n        committed or rolled back (or expired).\n\n        :param context: The request context, for access checks.\n        :param resources: A list of the resource names for which the\n                          usage must be reset.\n        "
+        elevated = context.elevated()
+        for resource in resources:
+            try:
+                db.quota_usage_update(elevated, context.project_id, context.user_id, resource, in_use=(-1))
+            except exception.QuotaUsageNotFound:
+                pass
+
+    def usage_refresh(self, context, resources, project_id=None, user_id=None, resource_names=None):
+        "Refresh the usage records for a particular project and user\n        on a list of resources.  This will force usage records to be\n        sync'd immediately to the actual usage.\n\n        This method will raise a QuotaUsageRefreshNotAllowed exception if a\n        usage refresh is not allowed on a resource for the given project\n        or user.\n\n        :param context: The request context, for access checks.\n        :param resources: A dictionary of the registered resources.\n        :param project_id: Optional: Project whose resources to\n                           refresh.  If not set, then the project_id\n                           is taken from the context.\n        :param user_id: Optional: User whose resources to refresh.\n                        If not set, then the user_id is taken from the\n                        context.\n        :param resources_names: Optional: A list of the resource names\n                                for which the usage must be refreshed.\n                                If not specified, then all the usages\n                                for the project and user will be refreshed.\n        "
+        if (project_id is None):
+            project_id = context.project_id
+        if (user_id is None):
+            user_id = context.user_id
+        syncable_resources = self._get_syncable_resources(resources, user_id)
+        if resource_names:
+            for res_name in resource_names:
+                if (res_name not in syncable_resources):
+                    raise exception.QuotaUsageRefreshNotAllowed(resource=res_name, project_id=project_id, user_id=user_id, syncable=syncable_resources)
+        else:
+            resource_names = syncable_resources
+        return db.quota_usage_refresh(context, resources, resource_names, CONF.quota.until_refresh, CONF.quota.max_age, project_id=project_id, user_id=user_id)
+
+    def destroy_all_by_project_and_user(self, context, project_id, user_id):
+        'Destroy all quotas associated with a project and user.\n\n        :param context: The request context, for access checks.\n        :param project_id: The ID of the project being deleted.\n        :param user_id: The ID of the user being deleted.\n        '
+        objects.Quotas.destroy_all_by_project_and_user(context, project_id, user_id)
+
+    def destroy_all_by_project(self, context, project_id):
+        'Destroy all quotas associated with a project.\n\n        :param context: The request context, for access checks.\n        :param project_id: The ID of the project being deleted.\n        '
+        objects.Quotas.destroy_all_by_project(context, project_id)
+
+    def expire(self, context):
+        'Expire reservations.\n\n        Explores all currently existing reservations and rolls back\n        any that have expired.\n\n        :param context: The request context, for access checks.\n        '
+        db.reservation_expire(context)
+
+class NoopQuotaDriver(object, ):
+    'Driver that turns quotas calls into no-ops and pretends that quotas\n    for all resources are unlimited.  This can be used if you do not\n    wish to have any quota checking.  For instance, with nova compute\n    cells, the parent cell should do quota checking, but the child cell\n    should not.\n    '
+
+    def get_by_project_and_user(self, context, project_id, user_id, resource):
+        'Get a specific quota by project and user.'
+        return (-1)
+
+    def get_by_project(self, context, project_id, resource):
+        'Get a specific quota by project.'
+        return (-1)
+
+    def get_by_class(self, context, quota_class, resource):
+        'Get a specific quota by quota class.'
+        return (-1)
+
+    def get_defaults(self, context, resources):
+        'Given a list of resources, retrieve the default quotas.\n\n        :param context: The request context, for access checks.\n        :param resources: A dictionary of the registered resources.\n        '
+        quotas = {}
+        for resource in resources.values():
+            quotas[resource.name] = (-1)
+        return quotas
+
+    def get_class_quotas(self, context, resources, quota_class, defaults=True):
+        'Given a list of resources, retrieve the quotas for the given\n        quota class.\n\n        :param context: The request context, for access checks.\n        :param resources: A dictionary of the registered resources.\n        :param quota_class: The name of the quota class to return\n                            quotas for.\n        :param defaults: If True, the default value will be reported\n                         if there is no specific value for the\n                         resource.\n        '
+        quotas = {}
+        for resource in resources.values():
+            quotas[resource.name] = (-1)
+        return quotas
+
+    def _get_noop_quotas(self, resources, usages=None, remains=False):
+        quotas = {}
+        for resource in resources.values():
+            quotas[resource.name] = {}
+            quotas[resource.name]['limit'] = (-1)
+            if usages:
+                quotas[resource.name]['in_use'] = (-1)
+                quotas[resource.name]['reserved'] = (-1)
+            if remains:
+                quotas[resource.name]['remains'] = (-1)
+        return quotas
+
+    def get_user_quotas(self, context, resources, project_id, user_id, quota_class=None, defaults=True, usages=True):
+        'Given a list of resources, retrieve the quotas for the given\n        user and project.\n\n        :param context: The request context, for access checks.\n        :param resources: A dictionary of the registered resources.\n        :param project_id: The ID of the project to return quotas for.\n        :param user_id: The ID of the user to return quotas for.\n        :param quota_class: If project_id != context.project_id, the\n                            quota class cannot be determined.  This\n                            parameter allows it to be specified.  It\n                            will be ignored if project_id ==\n                            context.project_id.\n        :param defaults: If True, the quota class value (or the\n                         default value, if there is no value from the\n                         quota class) will be reported if there is no\n                         specific value for the resource.\n        :param usages: If True, the current counts will also be returned.\n        '
+        return self._get_noop_quotas(resources, usages=usages)
+
+    def get_project_quotas(self, context, resources, project_id, quota_class=None, defaults=True, usages=True, remains=False):
+        'Given a list of resources, retrieve the quotas for the given\n        project.\n\n        :param context: The request context, for access checks.\n        :param resources: A dictionary of the registered resources.\n        :param project_id: The ID of the project to return quotas for.\n        :param quota_class: If project_id != context.project_id, the\n                            quota class cannot be determined.  This\n                            parameter allows it to be specified.  It\n                            will be ignored if project_id ==\n                            context.project_id.\n        :param defaults: If True, the quota class value (or the\n                         default value, if there is no value from the\n                         quota class) will be reported if there is no\n                         specific value for the resource.\n        :param usages: If True, the current counts will also be returned.\n        :param remains: If True, the current remains of the project will\n                        will be returned.\n        '
+        return self._get_noop_quotas(resources, usages=usages, remains=remains)
+
+    def get_settable_quotas(self, context, resources, project_id, user_id=None):
+        'Given a list of resources, retrieve the range of settable quotas for\n        the given user or project.\n\n        :param context: The request context, for access checks.\n        :param resources: A dictionary of the registered resources.\n        :param project_id: The ID of the project to return quotas for.\n        :param user_id: The ID of the user to return quotas for.\n        '
+        quotas = {}
+        for resource in resources.values():
+            quotas[resource.name] = {'minimum': 0, 'maximum': (-1)}
+        return quotas
+
+    def limit_check(self, context, resources, values, project_id=None, user_id=None):
+        "Check simple quota limits.\n\n        For limits--those quotas for which there is no usage\n        synchronization function--this method checks that a set of\n        proposed values are permitted by the limit restriction.\n\n        This method will raise a QuotaResourceUnknown exception if a\n        given resource is unknown or if it is not a simple limit\n        resource.\n\n        If any of the proposed values is over the defined quota, an\n        OverQuota exception will be raised with the sorted list of the\n        resources which are too high.  Otherwise, the method returns\n        nothing.\n\n        :param context: The request context, for access checks.\n        :param resources: A dictionary of the registered resources.\n        :param values: A dictionary of the values to check against the\n                       quota.\n        :param project_id: Specify the project_id if current context\n                           is admin and admin wants to impact on\n                           common user's tenant.\n        :param user_id: Specify the user_id if current context\n                        is admin and admin wants to impact on\n                        common user.\n        "
+        pass
+
+    def limit_check_project_and_user(self, context, resources, project_values=None, user_values=None, project_id=None, user_id=None):
+        "Check values against quota limits.\n\n        For limits--this method checks that a set of\n        proposed values are permitted by the limit restriction.\n\n        This method will raise a QuotaResourceUnknown exception if a\n        given resource is unknown or if it is not a simple limit\n        resource.\n\n        If any of the proposed values is over the defined quota, an\n        OverQuota exception will be raised with the sorted list of the\n        resources which are too high.  Otherwise, the method returns\n        nothing.\n\n        :param context: The request context, for access checks\n        :param resources: A dictionary of the registered resources\n        :param project_values: Optional dict containing the resource values to\n                            check against project quota,\n                            e.g. {'instances': 1, 'cores': 2, 'memory_mb': 512}\n        :param user_values: Optional dict containing the resource values to\n                            check against user quota,\n                            e.g. {'instances': 1, 'cores': 2, 'memory_mb': 512}\n        :param project_id: Optional project_id for scoping the limit check to a\n                           different project than in the context\n        :param user_id: Optional user_id for scoping the limit check to a\n                        different user than in the context\n        "
+        pass
+
+    def reserve(self, context, resources, deltas, expire=None, project_id=None, user_id=None):
+        "Check quotas and reserve resources.\n\n        For counting quotas--those quotas for which there is a usage\n        synchronization function--this method checks quotas against\n        current usage and the desired deltas.\n\n        This method will raise a QuotaResourceUnknown exception if a\n        given resource is unknown or if it does not have a usage\n        synchronization function.\n\n        If any of the proposed values is over the defined quota, an\n        OverQuota exception will be raised with the sorted list of the\n        resources which are too high.  Otherwise, the method returns a\n        list of reservation UUIDs which were created.\n\n        :param context: The request context, for access checks.\n        :param resources: A dictionary of the registered resources.\n        :param deltas: A dictionary of the proposed delta changes.\n        :param expire: An optional parameter specifying an expiration\n                       time for the reservations.  If it is a simple\n                       number, it is interpreted as a number of\n                       seconds and added to the current time; if it is\n                       a datetime.timedelta object, it will also be\n                       added to the current time.  A datetime.datetime\n                       object will be interpreted as the absolute\n                       expiration time.  If None is specified, the\n                       default expiration time set by\n                       --default-reservation-expire will be used (this\n                       value will be treated as a number of seconds).\n        :param project_id: Specify the project_id if current context\n                           is admin and admin wants to impact on\n                           common user's tenant.\n        :param user_id: Specify the user_id if current context\n                        is admin and admin wants to impact on\n                        common user.\n        "
+        return []
+
+    def commit(self, context, reservations, project_id=None, user_id=None):
+        "Commit reservations.\n\n        :param context: The request context, for access checks.\n        :param reservations: A list of the reservation UUIDs, as\n                             returned by the reserve() method.\n        :param project_id: Specify the project_id if current context\n                           is admin and admin wants to impact on\n                           common user's tenant.\n        :param user_id: Specify the user_id if current context\n                        is admin and admin wants to impact on\n                        common user.\n        "
+        pass
+
+    def rollback(self, context, reservations, project_id=None, user_id=None):
+        "Roll back reservations.\n\n        :param context: The request context, for access checks.\n        :param reservations: A list of the reservation UUIDs, as\n                             returned by the reserve() method.\n        :param project_id: Specify the project_id if current context\n                           is admin and admin wants to impact on\n                           common user's tenant.\n        :param user_id: Specify the user_id if current context\n                        is admin and admin wants to impact on\n                        common user.\n        "
+        pass
+
+    def usage_reset(self, context, resources):
+        "Reset the usage records for a particular user on a list of\n        resources.  This will force that user's usage records to be\n        refreshed the next time a reservation is made.\n\n        Note: this does not affect the currently outstanding\n        reservations the user has; those reservations must be\n        committed or rolled back (or expired).\n\n        :param context: The request context, for access checks.\n        :param resources: A list of the resource names for which the\n                          usage must be reset.\n        "
+        pass
+
+    def usage_refresh(self, context, resources, project_id=None, user_id=None, resource_names=None):
+        "Refresh the usage records for a particular project and user\n        on a list of resources.  This will force usage records to be\n        sync'd immediately to the actual usage.\n\n        This method will raise a QuotaUsageRefreshNotAllowed exception if a\n        usage refresh is not allowed on a resource for the given project\n        or user.\n\n        :param context: The request context, for access checks.\n        :param resources: A dictionary of the registered resources.\n        :param project_id: Optional: Project whose resources to\n                           refresh.  If not set, then the project_id\n                           is taken from the context.\n        :param user_id: Optional: User whose resources to refresh.\n                        If not set, then the user_id is taken from the\n                        context.\n        :param resources_names: Optional: A list of the resource names\n                                for which the usage must be refreshed.\n                                If not specified, then all the usages\n                                for the project and user will be refreshed.\n        "
+        pass
+
+    def destroy_all_by_project_and_user(self, context, project_id, user_id):
+        'Destroy all quotas associated with a project and user.\n\n        :param context: The request context, for access checks.\n        :param project_id: The ID of the project being deleted.\n        :param user_id: The ID of the user being deleted.\n        '
+        pass
+
+    def destroy_all_by_project(self, context, project_id):
+        'Destroy all quotas associated with a project.\n\n        :param context: The request context, for access checks.\n        :param project_id: The ID of the project being deleted.\n        '
+        pass
+
+    def expire(self, context):
+        'Expire reservations.\n\n        Explores all currently existing reservations and rolls back\n        any that have expired.\n\n        :param context: The request context, for access checks.\n        '
+        pass
+
+class BaseResource(object, ):
+    'Describe a single resource for quota checking.'
+
+    def __init__(self, name, flag=None):
+        'Initializes a Resource.\n\n        :param name: The name of the resource, i.e., "instances".\n        :param flag: The name of the flag or configuration option\n                     which specifies the default value of the quota\n                     for this resource.\n        '
+        self.name = name
+        self.flag = flag
+
+    def quota(self, driver, context, **kwargs):
+        'Given a driver and context, obtain the quota for this\n        resource.\n\n        :param driver: A quota driver.\n        :param context: The request context.\n        :param project_id: The project to obtain the quota value for.\n                           If not provided, it is taken from the\n                           context.  If it is given as None, no\n                           project-specific quota will be searched\n                           for.\n        :param quota_class: The quota class corresponding to the\n                            project, or for which the quota is to be\n                            looked up.  If not provided, it is taken\n                            from the context.  If it is given as None,\n                            no quota class-specific quota will be\n                            searched for.  Note that the quota class\n                            defaults to the value in the context,\n                            which may not correspond to the project if\n                            project_id is not the same as the one in\n                            the context.\n        '
+        project_id = kwargs.get('project_id', context.project_id)
+        quota_class = kwargs.get('quota_class', context.quota_class)
+        if project_id:
+            try:
+                return driver.get_by_project(context, project_id, self.name)
+            except exception.ProjectQuotaNotFound:
+                pass
+        if quota_class:
+            try:
+                return driver.get_by_class(context, quota_class, self.name)
+            except exception.QuotaClassNotFound:
+                pass
+        return self.default
+
+    @property
+    def default(self):
+        'Return the default value of the quota.'
+        if (self.flag == 'quota_networks'):
+            return CONF[self.flag]
+        return (CONF.quota[self.flag] if self.flag else (-1))
+
+class ReservableResource(BaseResource, ):
+    'Describe a reservable resource.'
+    valid_method = 'reserve'
+
+    def __init__(self, name, sync, flag=None):
+        'Initializes a ReservableResource.\n\n        Reservable resources are those resources which directly\n        correspond to objects in the database, i.e., instances,\n        cores, etc.\n\n        Usage synchronization function must be associated with each\n        object. This function will be called to determine the current\n        counts of one or more resources. This association is done in\n        database backend.\n\n        The usage synchronization function will be passed three\n        arguments: an admin context, the project ID, and an opaque\n        session object, which should in turn be passed to the\n        underlying database function.  Synchronization functions\n        should return a dictionary mapping resource names to the\n        current in_use count for those resources; more than one\n        resource and resource count may be returned.  Note that\n        synchronization functions may be associated with more than one\n        ReservableResource.\n\n        :param name: The name of the resource, i.e., "volumes".\n        :param sync: A dbapi methods name which returns a dictionary\n                     to resynchronize the in_use count for one or more\n                     resources, as described above.\n        :param flag: The name of the flag or configuration option\n                     which specifies the default value of the quota\n                     for this resource.\n        '
+        super(ReservableResource, self).__init__(name, flag=flag)
+        self.sync = sync
+
+class AbsoluteResource(BaseResource, ):
+    'Describe a resource that does not correspond to database objects.'
+    valid_method = 'check'
+
+class CountableResource(AbsoluteResource, ):
+    "Describe a resource where the counts aren't based solely on the\n    project ID.\n    "
+
+    def __init__(self, name, count_as_dict, flag=None):
+        'Initializes a CountableResource.\n\n        Countable resources are those resources which directly\n        correspond to objects in the database, i.e., instances, cores,\n        etc., but for which a count by project ID is inappropriate.  A\n        CountableResource must be constructed with a counting\n        function, which will be called to determine the current counts\n        of the resource.\n\n        The counting function will be passed the context, along with\n        the extra positional and keyword arguments that are passed to\n        Quota.count_as_dict().  It should return a dict specifying the\n        count scoped to a project and/or a user.\n\n        Example count of instances, cores, or ram returned as a rollup\n        of all the resources since we only want to query the instances\n        table once, not multiple times, for each resource.\n        Instances, cores, and ram are counted across a project and\n        across a user:\n\n            {\'project\': {\'instances\': 5, \'cores\': 8, \'ram\': 4096},\n             \'user\': {\'instances\': 1, \'cores\': 2, \'ram\': 512}}\n\n        Example count of server groups keeping a consistent format.\n        Server groups are counted across a project and across a user:\n\n            {\'project\': {\'server_groups\': 7},\n             \'user\': {\'server_groups\': 2}}\n\n        Example count of key pairs keeping a consistent format.\n        Key pairs are counted across a user only:\n\n            {\'user\': {\'key_pairs\': 5}}\n\n        Note that this counting is not performed in a transaction-safe\n        manner.  This resource class is a temporary measure to provide\n        required functionality, until a better approach to solving\n        this problem can be evolved.\n\n        :param name: The name of the resource, i.e., "instances".\n        :param count_as_dict: A callable which returns the count of the\n                              resource as a dict.  The arguments passed are as\n                              described above.\n        :param flag: The name of the flag or configuration option\n                     which specifies the default value of the quota\n                     for this resource.\n        '
+        super(CountableResource, self).__init__(name, flag=flag)
+        self.count_as_dict = count_as_dict
+
+class QuotaEngine(object, ):
+    'Represent the set of recognized quotas.'
+
+    def __init__(self, quota_driver_class=None):
+        'Initialize a Quota object.'
+        self._resources = {}
+        self._driver_cls = quota_driver_class
+        self.__driver = None
+
+    @property
+    def _driver(self):
+        if self.__driver:
+            return self.__driver
+        if (not self._driver_cls):
+            self._driver_cls = CONF.quota.driver
+        if isinstance(self._driver_cls, six.string_types):
+            self._driver_cls = importutils.import_object(self._driver_cls)
+        self.__driver = self._driver_cls
+        return self.__driver
+
+    def register_resource(self, resource):
+        'Register a resource.'
+        self._resources[resource.name] = resource
+
+    def register_resources(self, resources):
+        'Register a list of resources.'
+        for resource in resources:
+            self.register_resource(resource)
+
+    def get_by_project_and_user(self, context, project_id, user_id, resource):
+        'Get a specific quota by project and user.'
+        return self._driver.get_by_project_and_user(context, project_id, user_id, resource)
+
+    def get_by_project(self, context, project_id, resource):
+        'Get a specific quota by project.'
+        return self._driver.get_by_project(context, project_id, resource)
+
+    def get_by_class(self, context, quota_class, resource):
+        'Get a specific quota by quota class.'
+        return self._driver.get_by_class(context, quota_class, resource)
+
+    def get_defaults(self, context):
+        'Retrieve the default quotas.\n\n        :param context: The request context, for access checks.\n        '
+        return self._driver.get_defaults(context, self._resources)
+
+    def get_class_quotas(self, context, quota_class, defaults=True):
+        'Retrieve the quotas for the given quota class.\n\n        :param context: The request context, for access checks.\n        :param quota_class: The name of the quota class to return\n                            quotas for.\n        :param defaults: If True, the default value will be reported\n                         if there is no specific value for the\n                         resource.\n        '
+        return self._driver.get_class_quotas(context, self._resources, quota_class, defaults=defaults)
+
+    def get_user_quotas(self, context, project_id, user_id, quota_class=None, defaults=True, usages=True):
+        'Retrieve the quotas for the given user and project.\n\n        :param context: The request context, for access checks.\n        :param project_id: The ID of the project to return quotas for.\n        :param user_id: The ID of the user to return quotas for.\n        :param quota_class: If project_id != context.project_id, the\n                            quota class cannot be determined.  This\n                            parameter allows it to be specified.\n        :param defaults: If True, the quota class value (or the\n                         default value, if there is no value from the\n                         quota class) will be reported if there is no\n                         specific value for the resource.\n        :param usages: If True, the current counts will also be returned.\n        '
+        return self._driver.get_user_quotas(context, self._resources, project_id, user_id, quota_class=quota_class, defaults=defaults, usages=usages)
+
+    def get_project_quotas(self, context, project_id, quota_class=None, defaults=True, usages=True, remains=False):
+        'Retrieve the quotas for the given project.\n\n        :param context: The request context, for access checks.\n        :param project_id: The ID of the project to return quotas for.\n        :param quota_class: If project_id != context.project_id, the\n                            quota class cannot be determined.  This\n                            parameter allows it to be specified.\n        :param defaults: If True, the quota class value (or the\n                         default value, if there is no value from the\n                         quota class) will be reported if there is no\n                         specific value for the resource.\n        :param usages: If True, the current counts will also be returned.\n        :param remains: If True, the current remains of the project will\n                        will be returned.\n        '
+        return self._driver.get_project_quotas(context, self._resources, project_id, quota_class=quota_class, defaults=defaults, usages=usages, remains=remains)
+
+    def get_settable_quotas(self, context, project_id, user_id=None):
+        'Given a list of resources, retrieve the range of settable quotas for\n        the given user or project.\n\n        :param context: The request context, for access checks.\n        :param project_id: The ID of the project to return quotas for.\n        :param user_id: The ID of the user to return quotas for.\n        '
+        return self._driver.get_settable_quotas(context, self._resources, project_id, user_id=user_id)
+
+    def count_as_dict(self, context, resource, *args, **kwargs):
+        "Count a resource and return a dict.\n\n        For countable resources, invokes the count_as_dict() function and\n        returns its result.  Arguments following the context and\n        resource are passed directly to the count function declared by\n        the resource.\n\n        :param context: The request context, for access checks.\n        :param resource: The name of the resource, as a string.\n        :returns: A dict containing the count(s) for the resource, for example:\n                    {'project': {'instances': 2, 'cores': 4, 'ram': 1024},\n                     'user': {'instances': 1, 'cores': 2, 'ram': 512}}\n\n                  another example:\n                    {'user': {'key_pairs': 5}}\n        "
+        res = self._resources.get(resource)
+        if ((not res) or (not hasattr(res, 'count_as_dict'))):
+            raise exception.QuotaResourceUnknown(unknown=[resource])
+        return res.count_as_dict(context, *args, **kwargs)
+
+    def limit_check(self, context, project_id=None, user_id=None, **values):
+        "Check simple quota limits.\n\n        For limits--those quotas for which there is no usage\n        synchronization function--this method checks that a set of\n        proposed values are permitted by the limit restriction.  The\n        values to check are given as keyword arguments, where the key\n        identifies the specific quota limit to check, and the value is\n        the proposed value.\n\n        This method will raise a QuotaResourceUnknown exception if a\n        given resource is unknown or if it is not a simple limit\n        resource.\n\n        If any of the proposed values is over the defined quota, an\n        OverQuota exception will be raised with the sorted list of the\n        resources which are too high.  Otherwise, the method returns\n        nothing.\n\n        :param context: The request context, for access checks.\n        :param project_id: Specify the project_id if current context\n                           is admin and admin wants to impact on\n                           common user's tenant.\n        :param user_id: Specify the user_id if current context\n                        is admin and admin wants to impact on\n                        common user.\n        "
+        return self._driver.limit_check(context, self._resources, values, project_id=project_id, user_id=user_id)
+
+    def limit_check_project_and_user(self, context, project_values=None, user_values=None, project_id=None, user_id=None):
+        "Check values against quota limits.\n\n        For limits--this method checks that a set of\n        proposed values are permitted by the limit restriction.\n\n        This method will raise a QuotaResourceUnknown exception if a\n        given resource is unknown or if it is not a simple limit\n        resource.\n\n        If any of the proposed values is over the defined quota, an\n        OverQuota exception will be raised with the sorted list of the\n        resources which are too high.  Otherwise, the method returns\n        nothing.\n\n        :param context: The request context, for access checks\n        :param project_values: Optional dict containing the resource values to\n                            check against project quota,\n                            e.g. {'instances': 1, 'cores': 2, 'memory_mb': 512}\n        :param user_values: Optional dict containing the resource values to\n                            check against user quota,\n                            e.g. {'instances': 1, 'cores': 2, 'memory_mb': 512}\n        :param project_id: Optional project_id for scoping the limit check to a\n                           different project than in the context\n        :param user_id: Optional user_id for scoping the limit check to a\n                        different user than in the context\n        "
+        return self._driver.limit_check_project_and_user(context, self._resources, project_values=project_values, user_values=user_values, project_id=project_id, user_id=user_id)
+
+    def reserve(self, context, expire=None, project_id=None, user_id=None, **deltas):
+        "Check quotas and reserve resources.\n\n        For counting quotas--those quotas for which there is a usage\n        synchronization function--this method checks quotas against\n        current usage and the desired deltas.  The deltas are given as\n        keyword arguments, and current usage and other reservations\n        are factored into the quota check.\n\n        This method will raise a QuotaResourceUnknown exception if a\n        given resource is unknown or if it does not have a usage\n        synchronization function.\n\n        If any of the proposed values is over the defined quota, an\n        OverQuota exception will be raised with the sorted list of the\n        resources which are too high.  Otherwise, the method returns a\n        list of reservation UUIDs which were created.\n\n        :param context: The request context, for access checks.\n        :param expire: An optional parameter specifying an expiration\n                       time for the reservations.  If it is a simple\n                       number, it is interpreted as a number of\n                       seconds and added to the current time; if it is\n                       a datetime.timedelta object, it will also be\n                       added to the current time.  A datetime.datetime\n                       object will be interpreted as the absolute\n                       expiration time.  If None is specified, the\n                       default expiration time set by\n                       --default-reservation-expire will be used (this\n                       value will be treated as a number of seconds).\n        :param project_id: Specify the project_id if current context\n                           is admin and admin wants to impact on\n                           common user's tenant.\n        "
+        reservations = self._driver.reserve(context, self._resources, deltas, expire=expire, project_id=project_id, user_id=user_id)
+        LOG.debug('Created reservations %s', reservations)
+        return reservations
+
+    def commit(self, context, reservations, project_id=None, user_id=None):
+        "Commit reservations.\n\n        :param context: The request context, for access checks.\n        :param reservations: A list of the reservation UUIDs, as\n                             returned by the reserve() method.\n        :param project_id: Specify the project_id if current context\n                           is admin and admin wants to impact on\n                           common user's tenant.\n        "
+        try:
+            self._driver.commit(context, reservations, project_id=project_id, user_id=user_id)
+        except Exception:
+            LOG.exception(_LE('Failed to commit reservations %s'), reservations)
+            return
+        LOG.debug('Committed reservations %s', reservations)
+
+    def rollback(self, context, reservations, project_id=None, user_id=None):
+        "Roll back reservations.\n\n        :param context: The request context, for access checks.\n        :param reservations: A list of the reservation UUIDs, as\n                             returned by the reserve() method.\n        :param project_id: Specify the project_id if current context\n                           is admin and admin wants to impact on\n                           common user's tenant.\n        "
+        try:
+            self._driver.rollback(context, reservations, project_id=project_id, user_id=user_id)
+        except Exception:
+            LOG.exception(_LE('Failed to roll back reservations %s'), reservations)
+            return
+        LOG.debug('Rolled back reservations %s', reservations)
+
+    def usage_reset(self, context, resources):
+        "Reset the usage records for a particular user on a list of\n        resources.  This will force that user's usage records to be\n        refreshed the next time a reservation is made.\n\n        Note: this does not affect the currently outstanding\n        reservations the user has; those reservations must be\n        committed or rolled back (or expired).\n\n        :param context: The request context, for access checks.\n        :param resources: A list of the resource names for which the\n                          usage must be reset.\n        "
+        self._driver.usage_reset(context, resources)
+
+    def usage_refresh(self, context, project_id=None, user_id=None, resource_names=None):
+        "Refresh the usage records for a particular project and user\n        on a list of resources.  This will force usage records to be\n        sync'd immediately to the actual usage.\n\n        This method will raise a QuotaUsageRefreshNotAllowed exception if a\n        usage refresh is not allowed on a resource for the given project\n        or user.\n\n        :param context: The request context, for access checks.\n        :param project_id: Optional:  Project whose resources to\n                           refresh.  If not set, then the project_id\n                           is taken from the context.\n        :param user_id: Optional: User whose resources to refresh.\n                        If not set, then the user_id is taken from the\n                        context.\n        :param resources_names: Optional: A list of the resource names\n                                for which the usage must be refreshed.\n                                If not specified, then all the usages\n                                for the project and user will be refreshed.\n        "
+        self._driver.usage_refresh(context, self._resources, project_id, user_id, resource_names)
+
+    def destroy_all_by_project_and_user(self, context, project_id, user_id):
+        'Destroy all quotas, usages, and reservations associated with a\n        project and user.\n\n        :param context: The request context, for access checks.\n        :param project_id: The ID of the project being deleted.\n        :param user_id: The ID of the user being deleted.\n        '
+        self._driver.destroy_all_by_project_and_user(context, project_id, user_id)
+
+    def destroy_all_by_project(self, context, project_id):
+        'Destroy all quotas, usages, and reservations associated with a\n        project.\n\n        :param context: The request context, for access checks.\n        :param project_id: The ID of the project being deleted.\n        '
+        self._driver.destroy_all_by_project(context, project_id)
+
+    def expire(self, context):
+        'Expire reservations.\n\n        Explores all currently existing reservations and rolls back\n        any that have expired.\n\n        :param context: The request context, for access checks.\n        '
+        self._driver.expire(context)
+
+    @property
+    def resources(self):
+        return sorted(self._resources.keys())
+
+def _keypair_get_count_by_user(context, user_id):
+    count = objects.KeyPairList.get_count_by_user(context, user_id)
+    return {'user': {'key_pairs': count}}
+
+def _security_group_count(context, project_id, user_id=None):
+    "Get the counts of security groups in the database.\n\n    :param context: The request context for database access\n    :param project_id: The project_id to count across\n    :param user_id: The user_id to count across\n    :returns: A dict containing the project-scoped counts and user-scoped\n              counts if user_id is specified. For example:\n\n                {'project': {'security_groups': <count across project>},\n                 'user': {'security_groups': <count across user>}}\n    "
+    return objects.SecurityGroupList.get_counts(context, project_id, user_id=user_id)
+
+def _server_group_count_members_by_user(context, group, user_id):
+    cell_mappings = objects.CellMappingList.get_all(context)
+    greenthreads = []
+    filters = {'deleted': False, 'user_id': user_id, 'uuid': group.members}
+    for cell_mapping in cell_mappings:
+        with nova_context.target_cell(context, cell_mapping) as cctxt:
+            greenthreads.append(utils.spawn(objects.InstanceList.get_by_filters, cctxt, filters))
+    instances = objects.InstanceList(objects=[])
+    for greenthread in greenthreads:
+        found = greenthread.wait()
+        instances = (instances + found)
+    return {'user': {'server_group_members': len(instances)}}
+
+def _fixed_ip_count(context, project_id):
+    count = objects.FixedIPList.get_count_by_project(context, project_id)
+    return {'project': {'fixed_ips': count}}
+
+def _floating_ip_count(context, project_id):
+    count = objects.FloatingIPList.get_count_by_project(context, project_id)
+    return {'project': {'floating_ips': count}}
+
+def _instances_cores_ram_count(context, project_id, user_id=None):
+    "Get the counts of instances, cores, and ram in the database.\n\n    :param context: The request context for database access\n    :param project_id: The project_id to count across\n    :param user_id: The user_id to count across\n    :returns: A dict containing the project-scoped counts and user-scoped\n              counts if user_id is specified. For example:\n\n                {'project': {'instances': <count across project>,\n                             'cores': <count across project>,\n                             'ram': <count across project>},\n                 'user': {'instances': <count across user>,\n                          'cores': <count across user>,\n                          'ram': <count across user>}}\n    "
+    results = nova_context.scatter_gather_all_cells(context, objects.InstanceList.get_counts, project_id, user_id=user_id)
+    total_counts = {'project': {'instances': 0, 'cores': 0, 'ram': 0}}
+    if user_id:
+        total_counts['user'] = {'instances': 0, 'cores': 0, 'ram': 0}
+    for (cell_uuid, result) in results.items():
+        if (result not in (nova_context.did_not_respond_sentinel, nova_context.raised_exception_sentinel)):
+            for (resource, count) in result['project'].items():
+                total_counts['project'][resource] += count
+            if user_id:
+                for (resource, count) in result['user'].items():
+                    total_counts['user'][resource] += count
+    return total_counts
+
+def _server_group_count(context, project_id, user_id=None):
+    "Get the counts of server groups in the database.\n\n    :param context: The request context for database access\n    :param project_id: The project_id to count across\n    :param user_id: The user_id to count across\n    :returns: A dict containing the project-scoped counts and user-scoped\n              counts if user_id is specified. For example:\n\n                {'project': {'server_groups': <count across project>},\n                 'user': {'server_groups': <count across user>}}\n    "
+    return objects.InstanceGroupList.get_counts(context, project_id, user_id=user_id)
+
+def _security_group_rule_count_by_group(context, security_group_id):
+    count = db.security_group_rule_count_by_group(context, security_group_id)
+    return {'user': {'security_group_rules': count}}
+QUOTAS = QuotaEngine()
+resources = [CountableResource('instances', _instances_cores_ram_count, 'instances'), CountableResource('cores', _instances_cores_ram_count, 'cores'), CountableResource('ram', _instances_cores_ram_count, 'ram'), CountableResource('security_groups', _security_group_count, 'security_groups'), CountableResource('fixed_ips', _fixed_ip_count, 'fixed_ips'), CountableResource('floating_ips', _floating_ip_count, 'floating_ips'), AbsoluteResource('metadata_items', 'metadata_items'), AbsoluteResource('injected_files', 'injected_files'), AbsoluteResource('injected_file_content_bytes', 'injected_file_content_bytes'), AbsoluteResource('injected_file_path_bytes', 'injected_file_path_length'), CountableResource('security_group_rules', _security_group_rule_count_by_group, 'security_group_rules'), CountableResource('key_pairs', _keypair_get_count_by_user, 'key_pairs'), CountableResource('server_groups', _server_group_count, 'server_groups'), CountableResource('server_group_members', _server_group_count_members_by_user, 'server_group_members')]
+QUOTAS.register_resources(resources)
+
+def _valid_method_call_check_resource(name, method, resources):
+    if (name not in resources):
+        raise exception.InvalidQuotaMethodUsage(method=method, res=name)
+    res = resources[name]
+    if (res.valid_method != method):
+        raise exception.InvalidQuotaMethodUsage(method=method, res=name)
+
+def _valid_method_call_check_resources(resource_values, method, resources):
+    'A method to check whether the resource can use the quota method.\n\n    :param resource_values: Dict containing the resource names and values\n    :param method: The quota method to check\n    :param resources: Dict containing Resource objects to validate against\n    '
+    for name in resource_values.keys():
+        _valid_method_call_check_resource(name, method, resources)

@@ -1,0 +1,83 @@
+--- /root/HuaweiCASTcode/PyCAST_Agent/Campaigns/Campaign_NOVA_FULL_16/Test_5//orig_file	2018-06-27 20:39:36.788739227 +0200
++++ /root/HuaweiCASTcode/PyCAST_Agent/Campaigns/Campaign_NOVA_FULL_16/Test_5//mutated_file	2018-06-27 20:39:36.788739227 +0200
+@@ -1,4 +1,71 @@
+ 
++import random, binascii, threading, os
++
++def pycc_corrupt_string(string):
++    if string:
++        if (random.randint(0, 1) == 0):
++            hexstring = binascii.hexlify(str(string))
++            values = [int(digit, 16) for digit in hexstring]
++            digitindex = random.randint(0, len(values))
++            bitindex = random.randint(0, 3)
++            values[(digitindex - 1)] ^= (1 << bitindex)
++            result = ''.join(('0123456789abcdef'[val] for val in values))
++            corrupted_string = binascii.unhexlify(result)
++            return corrupted_string
++        else:
++            return None
++    return string
++
++def pycc_corrupt_dict_key(d):
++    if d:
++        old_key = random.choice(d.keys())
++        corrupted_key = pycc_corrupt(old_key)
++        d[corrupted_key] = d.pop(old_key)
++    return d
++
++def pycc_corrupt(target, mode=None):
++    if isinstance(target, int):
++        return (-1)
++    elif isinstance(target, str):
++        return pycc_corrupt_string(target)
++    elif isinstance(target, dict):
++        return pycc_corrupt_dict_key(target)
++    elif isinstance(target, bool):
++        return (not target)
++    else:
++        return None
++pycc_leaked_files = list()
++
++def _pycc_hog_fd():
++    try:
++        i = 0
++        files = []
++        pycc_leak_file_dir = '/tmp/pycc_file_leak_dir/'
++        os.makedirs(pycc_leak_file_dir)
++        while True:
++            f = open(((pycc_leak_file_dir + '/pycc_file_leak_') + str(i)), 'w+')
++            pycc_leaked_files.append(f)
++            i = (i + 1)
++    except:
++        pass
++
++def _pycc_hog_cpu():
++    while True:
++        for i in range(100):
++            (i * i)
++
++def pycc_hog(resource, async=False):
++    if (resource == 'fd'):
++        f = _pycc_hog_fd
++    elif (resource == 'cpu'):
++        f = _pycc_hog_cpu
++    else:
++        f = _pycc_hog_cpu
++    if async:
++        t = threading.Thread(target=f)
++        t.start()
++    else:
++        f()
+ 'Handles all processes relating to instances (guest vms).\n\nThe :py:class:`ComputeManager` class is a :py:class:`nova.manager.Manager` that\nhandles RPC calls relating to creating instances.  It is responsible for\nbuilding a disk image, launching it via the underlying virtualization driver,\nresponding to calls to check its state, attaching persistent storage, and\nterminating it.\n\n'
+ import base64
+ import binascii
+@@ -1710,7 +1777,7 @@
+         block_device_info = self._get_instance_block_device_info(context, instance)
+         network_info = self.network_api.get_instance_nw_info(context, instance)
+         self._notify_about_instance_usage(context, instance, 'reboot.start')
+-        compute_utils.notify_about_instance_action(context, instance, self.host, action=fields.NotificationAction.REBOOT, phase=fields.NotificationPhase.START)
++        compute_utils.notify_about_instance_action(pycc_corrupt(context), instance, self.host, action=fields.NotificationAction.REBOOT, phase=fields.NotificationPhase.START)
+         instance.power_state = self._get_power_state(context, instance)
+         instance.save(expected_task_state=expected_states)
+         if (instance.power_state != power_state.RUNNING):

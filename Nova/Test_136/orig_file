@@ -1,0 +1,483 @@
+
+'Compute-related Utilities and helpers.'
+import contextlib
+import functools
+import inspect
+import itertools
+import math
+import string
+import traceback
+import netifaces
+from oslo_log import log
+import six
+from nova import block_device
+from nova.compute import power_state
+from nova.compute import task_states
+import nova.conf
+from nova import exception
+from nova import notifications
+from nova.notifications.objects import aggregate as aggregate_notification
+from nova.notifications.objects import base as notification_base
+from nova.notifications.objects import exception as notification_exception
+from nova.notifications.objects import instance as instance_notification
+from nova.notifications.objects import keypair as keypair_notification
+from nova import objects
+from nova.objects import fields
+from nova import rpc
+from nova import safe_utils
+from nova import utils
+from nova.virt import driver
+CONF = nova.conf.CONF
+LOG = log.getLogger(__name__)
+
+def exception_to_dict(fault, message=None):
+    'Converts exceptions to a dict for use in notifications.'
+    code = 500
+    if hasattr(fault, 'kwargs'):
+        code = fault.kwargs.get('code', 500)
+    try:
+        if (not message):
+            message = fault.format_message()
+    except Exception:
+        try:
+            message = six.text_type(fault)
+        except Exception:
+            message = None
+    if (not message):
+        message = fault.__class__.__name__
+    u_message = utils.safe_truncate(message, 255)
+    fault_dict = dict(exception=fault)
+    fault_dict['message'] = u_message
+    fault_dict['code'] = code
+    return fault_dict
+
+def _get_fault_details(exc_info, error_code):
+    details = ''
+    if (exc_info and (error_code == 500)):
+        tb = exc_info[2]
+        if tb:
+            details = ''.join(traceback.format_tb(tb))
+    return six.text_type(details)
+
+def add_instance_fault_from_exc(context, instance, fault, exc_info=None, fault_message=None):
+    'Adds the specified fault to the database.'
+    fault_obj = objects.InstanceFault(context=context)
+    fault_obj.host = CONF.host
+    fault_obj.instance_uuid = instance.uuid
+    fault_obj.update(exception_to_dict(fault, message=fault_message))
+    code = fault_obj.code
+    fault_obj.details = _get_fault_details(exc_info, code)
+    fault_obj.create()
+
+def get_device_name_for_instance(instance, bdms, device):
+    'Validates (or generates) a device name for instance.\n\n    This method is a wrapper for get_next_device_name that gets the list\n    of used devices and the root device from a block device mapping.\n    '
+    mappings = block_device.instance_block_mapping(instance, bdms)
+    return get_next_device_name(instance, mappings.values(), mappings['root'], device)
+
+def default_device_names_for_instance(instance, root_device_name, *block_device_lists):
+    'Generate missing device names for an instance.'
+    dev_list = [bdm.device_name for bdm in itertools.chain(*block_device_lists) if bdm.device_name]
+    if (root_device_name not in dev_list):
+        dev_list.append(root_device_name)
+    for bdm in itertools.chain(*block_device_lists):
+        dev = bdm.device_name
+        if (not dev):
+            dev = get_next_device_name(instance, dev_list, root_device_name)
+            bdm.device_name = dev
+            bdm.save()
+            dev_list.append(dev)
+
+def get_next_device_name(instance, device_name_list, root_device_name=None, device=None):
+    'Validates (or generates) a device name for instance.\n\n    If device is not set, it will generate a unique device appropriate\n    for the instance. It uses the root_device_name (if provided) and\n    the list of used devices to find valid device names. If the device\n    name is valid but applicable to a different backend (for example\n    /dev/vdc is specified but the backend uses /dev/xvdc), the device\n    name will be converted to the appropriate format.\n    '
+    req_prefix = None
+    req_letter = None
+    if device:
+        try:
+            (req_prefix, req_letter) = block_device.match_device(device)
+        except (TypeError, AttributeError, ValueError):
+            raise exception.InvalidDevicePath(path=device)
+    if (not root_device_name):
+        root_device_name = block_device.DEFAULT_ROOT_DEV_NAME
+    try:
+        prefix = block_device.match_device(block_device.prepend_dev(root_device_name))[0]
+    except (TypeError, AttributeError, ValueError):
+        raise exception.InvalidDevicePath(path=root_device_name)
+    if driver.is_xenapi():
+        prefix = '/dev/xvd'
+    if (req_prefix != prefix):
+        LOG.debug('Using %(prefix)s instead of %(req_prefix)s', {'prefix': prefix, 'req_prefix': req_prefix})
+    used_letters = set()
+    for device_path in device_name_list:
+        letter = block_device.get_device_letter(device_path)
+        used_letters.add(letter)
+    if driver.is_xenapi():
+        flavor = instance.get_flavor()
+        if flavor.ephemeral_gb:
+            used_letters.add('b')
+        if flavor.swap:
+            used_letters.add('c')
+    if (not req_letter):
+        req_letter = _get_unused_letter(used_letters)
+    if (req_letter in used_letters):
+        raise exception.DevicePathInUse(path=device)
+    return (prefix + req_letter)
+
+def get_root_bdm(context, instance, bdms=None):
+    if (bdms is None):
+        if isinstance(instance, objects.Instance):
+            uuid = instance.uuid
+        else:
+            uuid = instance['uuid']
+        bdms = objects.BlockDeviceMappingList.get_by_instance_uuid(context, uuid)
+    return bdms.root_bdm()
+
+def is_volume_backed_instance(context, instance, bdms=None):
+    root_bdm = get_root_bdm(context, instance, bdms)
+    if (root_bdm is not None):
+        return root_bdm.is_volume
+    if isinstance(instance, objects.Instance):
+        return (not instance.image_ref)
+    return (not instance['image_ref'])
+
+def convert_mb_to_ceil_gb(mb_value):
+    gb_int = 0
+    if mb_value:
+        gb_float = (mb_value / 1024.0)
+        gb_int = int(math.ceil(gb_float))
+    return gb_int
+
+def _get_unused_letter(used_letters):
+    doubles = [(first + second) for second in string.ascii_lowercase for first in string.ascii_lowercase]
+    all_letters = set((list(string.ascii_lowercase) + doubles))
+    letters = list((all_letters - used_letters))
+    letters.sort(key=(lambda x: x.rjust(2, '`')))
+    return letters[0]
+
+def get_value_from_system_metadata(instance, key, type, default):
+    'Get a value of a specified type from image metadata.\n\n    @param instance: The instance object\n    @param key: The name of the property to get\n    @param type: The python type the value is be returned as\n    @param default: The value to return if key is not set or not the right type\n    '
+    value = instance.system_metadata.get(key, default)
+    try:
+        return type(value)
+    except ValueError:
+        LOG.warning('Metadata value %(value)s for %(key)s is not of type %(type)s. Using default value %(default)s.', {'value': value, 'key': key, 'type': type, 'default': default}, instance=instance)
+        return default
+
+def notify_usage_exists(notifier, context, instance_ref, current_period=False, ignore_missing_network_data=True, system_metadata=None, extra_usage_info=None):
+    "Generates 'exists' unversioned legacy notification for an instance for\n    usage auditing purposes.\n\n    :param notifier: a messaging.Notifier\n\n    :param current_period: if True, this will generate a usage for the\n        current usage period; if False, this will generate a usage for the\n        previous audit period.\n\n    :param ignore_missing_network_data: if True, log any exceptions generated\n        while getting network info; if False, raise the exception.\n    :param system_metadata: system_metadata DB entries for the instance,\n        if not None.  *NOTE*: Currently unused here in trunk, but needed for\n        potential custom modifications.\n    :param extra_usage_info: Dictionary containing extra values to add or\n        override in the notification if not None.\n    "
+    (audit_start, audit_end) = notifications.audit_period_bounds(current_period)
+    bw = notifications.bandwidth_usage(instance_ref, audit_start, ignore_missing_network_data)
+    if (system_metadata is None):
+        system_metadata = utils.instance_sys_meta(instance_ref)
+    image_meta = notifications.image_meta(system_metadata)
+    extra_info = dict(audit_period_beginning=str(audit_start), audit_period_ending=str(audit_end), bandwidth=bw, image_meta=image_meta)
+    if extra_usage_info:
+        extra_info.update(extra_usage_info)
+    notify_about_instance_usage(notifier, context, instance_ref, 'exists', system_metadata=system_metadata, extra_usage_info=extra_info)
+
+def notify_about_instance_usage(notifier, context, instance, event_suffix, network_info=None, system_metadata=None, extra_usage_info=None, fault=None):
+    'Send an unversioned legacy notification about an instance.\n\n    All new notifications should use notify_about_instance_action which sends\n    a versioned notification.\n\n    :param notifier: a messaging.Notifier\n    :param event_suffix: Event type like "delete.start" or "exists"\n    :param network_info: Networking information, if provided.\n    :param system_metadata: system_metadata DB entries for the instance,\n        if provided.\n    :param extra_usage_info: Dictionary containing extra values to add or\n        override in the notification.\n    '
+    if (not extra_usage_info):
+        extra_usage_info = {}
+    usage_info = notifications.info_from_instance(context, instance, network_info, system_metadata, **extra_usage_info)
+    if fault:
+        fault_payload = exception_to_dict(fault)
+        LOG.debug(fault_payload['message'], instance=instance)
+        usage_info.update(fault_payload)
+    if event_suffix.endswith('error'):
+        method = notifier.error
+    else:
+        method = notifier.info
+    method(context, ('compute.instance.%s' % event_suffix), usage_info)
+
+def _get_fault_and_priority_from_exc(exception):
+    fault = None
+    priority = fields.NotificationPriority.INFO
+    if exception:
+        priority = fields.NotificationPriority.ERROR
+        fault = notification_exception.ExceptionPayload.from_exception(exception)
+    return (fault, priority)
+
+@rpc.if_notifications_enabled
+def notify_about_instance_action(context, instance, host, action, phase=None, binary='nova-compute', exception=None):
+    'Send versioned notification about the action made on the instance\n    :param instance: the instance which the action performed on\n    :param host: the host emitting the notification\n    :param action: the name of the action\n    :param phase: the phase of the action\n    :param binary: the binary emitting the notification\n    :param exception: the thrown exception (used in error notifications)\n    '
+    (fault, priority) = _get_fault_and_priority_from_exc(exception)
+    payload = instance_notification.InstanceActionPayload(instance=instance, fault=fault)
+    notification = instance_notification.InstanceActionNotification(context=context, priority=priority, publisher=notification_base.NotificationPublisher(host=host, binary=binary), event_type=notification_base.EventType(object='instance', action=action, phase=phase), payload=payload)
+    notification.emit(context)
+
+@rpc.if_notifications_enabled
+def notify_about_instance_create(context, instance, host, phase=None, binary='nova-compute', exception=None):
+    'Send versioned notification about instance creation\n\n    :param context: the request context\n    :param instance: the instance being created\n    :param host: the host emitting the notification\n    :param phase: the phase of the creation\n    :param binary: the binary emitting the notification\n    :param exception: the thrown exception (used in error notifications)\n    '
+    (fault, priority) = _get_fault_and_priority_from_exc(exception)
+    payload = instance_notification.InstanceCreatePayload(instance=instance, fault=fault)
+    notification = instance_notification.InstanceCreateNotification(context=context, priority=priority, publisher=notification_base.NotificationPublisher(host=host, binary=binary), event_type=notification_base.EventType(object='instance', action=fields.NotificationAction.CREATE, phase=phase), payload=payload)
+    notification.emit(context)
+
+@rpc.if_notifications_enabled
+def notify_about_volume_attach_detach(context, instance, host, action, phase, binary='nova-compute', volume_id=None, exception=None):
+    'Send versioned notification about the action made on the instance\n    :param instance: the instance which the action performed on\n    :param host: the host emitting the notification\n    :param action: the name of the action\n    :param phase: the phase of the action\n    :param binary: the binary emitting the notification\n    :param volume_id: id of the volume will be attached\n    :param exception: the thrown exception (used in error notifications)\n    '
+    (fault, priority) = _get_fault_and_priority_from_exc(exception)
+    payload = instance_notification.InstanceActionVolumePayload(instance=instance, fault=fault, volume_id=volume_id)
+    notification = instance_notification.InstanceActionVolumeNotification(context=context, priority=priority, publisher=notification_base.NotificationPublisher(host=host, binary=binary), event_type=notification_base.EventType(object='instance', action=action, phase=phase), payload=payload)
+    notification.emit(context)
+
+@rpc.if_notifications_enabled
+def notify_about_keypair_action(context, keypair, action, phase):
+    'Send versioned notification about the keypair action on the instance\n\n    :param context: the request context\n    :param keypair: the keypair which the action performed on\n    :param action: the name of the action\n    :param phase: the phase of the action\n    '
+    payload = keypair_notification.KeypairPayload(keypair=keypair)
+    notification = keypair_notification.KeypairNotification(priority=fields.NotificationPriority.INFO, publisher=notification_base.NotificationPublisher(host=CONF.host, binary='nova-api'), event_type=notification_base.EventType(object='keypair', action=action, phase=phase), payload=payload)
+    notification.emit(context)
+
+@rpc.if_notifications_enabled
+def notify_about_volume_swap(context, instance, host, action, phase, old_volume_id, new_volume_id, exception=None):
+    'Send versioned notification about the volume swap action\n       on the instance\n\n    :param context: the request context\n    :param instance: the instance which the action performed on\n    :param host: the host emitting the notification\n    :param action: the name of the action\n    :param phase: the phase of the action\n    :param old_volume_id: the ID of the volume that is copied from and detached\n    :param new_volume_id: the ID of the volume that is copied to and attached\n    :param exception: an exception\n    '
+    (fault, priority) = _get_fault_and_priority_from_exc(exception)
+    payload = instance_notification.InstanceActionVolumeSwapPayload(instance=instance, fault=fault, old_volume_id=old_volume_id, new_volume_id=new_volume_id)
+    instance_notification.InstanceActionVolumeSwapNotification(context=context, priority=priority, publisher=notification_base.NotificationPublisher(host=host, binary='nova-compute'), event_type=notification_base.EventType(object='instance', action=action, phase=phase), payload=payload).emit(context)
+
+def notify_about_server_group_update(context, event_suffix, sg_payload):
+    'Send a notification about server group update.\n\n    :param event_suffix: Event type like "create.start" or "create.end"\n    :param sg_payload: payload for server group update\n    '
+    notifier = rpc.get_notifier(service='servergroup')
+    notifier.info(context, ('servergroup.%s' % event_suffix), sg_payload)
+
+def notify_about_aggregate_update(context, event_suffix, aggregate_payload):
+    'Send a notification about aggregate update.\n\n    :param event_suffix: Event type like "create.start" or "create.end"\n    :param aggregate_payload: payload for aggregate update\n    '
+    aggregate_identifier = aggregate_payload.get('aggregate_id', None)
+    if (not aggregate_identifier):
+        aggregate_identifier = aggregate_payload.get('name', None)
+        if (not aggregate_identifier):
+            LOG.debug('No aggregate id or name specified for this notification and it will be ignored')
+            return
+    notifier = rpc.get_notifier(service='aggregate', host=aggregate_identifier)
+    notifier.info(context, ('aggregate.%s' % event_suffix), aggregate_payload)
+
+@rpc.if_notifications_enabled
+def notify_about_aggregate_action(context, aggregate, action, phase):
+    payload = aggregate_notification.AggregatePayload(aggregate)
+    notification = aggregate_notification.AggregateNotification(priority=fields.NotificationPriority.INFO, publisher=notification_base.NotificationPublisher(host=CONF.host, binary='nova-api'), event_type=notification_base.EventType(object='aggregate', action=action, phase=phase), payload=payload)
+    notification.emit(context)
+
+def notify_about_host_update(context, event_suffix, host_payload):
+    'Send a notification about host update.\n\n    :param event_suffix: Event type like "create.start" or "create.end"\n    :param host_payload: payload for host update. It is a dict and there\n                         should be at least the \'host_name\' key in this\n                         dict.\n    '
+    host_identifier = host_payload.get('host_name')
+    if (not host_identifier):
+        LOG.warning('No host name specified for the notification of HostAPI.%s and it will be ignored', event_suffix)
+        return
+    notifier = rpc.get_notifier(service='api', host=host_identifier)
+    notifier.info(context, ('HostAPI.%s' % event_suffix), host_payload)
+
+def refresh_info_cache_for_instance(context, instance):
+    'Refresh the info cache for an instance.\n\n    :param instance: The instance object.\n    '
+    if ((instance.info_cache is not None) and (not instance.deleted)):
+        try:
+            instance.info_cache.refresh()
+        except exception.InstanceInfoCacheNotFound:
+            LOG.debug('Can not refresh info_cache because instance was not found', instance=instance)
+
+def usage_volume_info(vol_usage):
+
+    def null_safe_str(s):
+        return (str(s) if s else '')
+    tot_refreshed = vol_usage.tot_last_refreshed
+    curr_refreshed = vol_usage.curr_last_refreshed
+    if (tot_refreshed and curr_refreshed):
+        last_refreshed_time = max(tot_refreshed, curr_refreshed)
+    elif tot_refreshed:
+        last_refreshed_time = tot_refreshed
+    else:
+        last_refreshed_time = curr_refreshed
+    usage_info = dict(volume_id=vol_usage.volume_id, tenant_id=vol_usage.project_id, user_id=vol_usage.user_id, availability_zone=vol_usage.availability_zone, instance_id=vol_usage.instance_uuid, last_refreshed=null_safe_str(last_refreshed_time), reads=(vol_usage.tot_reads + vol_usage.curr_reads), read_bytes=(vol_usage.tot_read_bytes + vol_usage.curr_read_bytes), writes=(vol_usage.tot_writes + vol_usage.curr_writes), write_bytes=(vol_usage.tot_write_bytes + vol_usage.curr_write_bytes))
+    return usage_info
+
+def get_reboot_type(task_state, current_power_state):
+    'Checks if the current instance state requires a HARD reboot.'
+    if (current_power_state != power_state.RUNNING):
+        return 'HARD'
+    soft_types = [task_states.REBOOT_STARTED, task_states.REBOOT_PENDING, task_states.REBOOTING]
+    reboot_type = ('SOFT' if (task_state in soft_types) else 'HARD')
+    return reboot_type
+
+def get_machine_ips():
+    "Get the machine's ip addresses\n\n    :returns: list of Strings of ip addresses\n    "
+    addresses = []
+    for interface in netifaces.interfaces():
+        try:
+            iface_data = netifaces.ifaddresses(interface)
+            for family in iface_data:
+                if (family not in (netifaces.AF_INET, netifaces.AF_INET6)):
+                    continue
+                for address in iface_data[family]:
+                    addr = address['addr']
+                    if (family == netifaces.AF_INET6):
+                        addr = addr.split('%')[0]
+                    addresses.append(addr)
+        except ValueError:
+            pass
+    return addresses
+
+def resize_quota_delta(context, new_flavor, old_flavor, sense, compare):
+    "Calculate any quota adjustment required at a particular point\n    in the resize cycle.\n\n    :param context: the request context\n    :param new_flavor: the target instance type\n    :param old_flavor: the original instance type\n    :param sense: the sense of the adjustment, 1 indicates a\n                  forward adjustment, whereas -1 indicates a\n                  reversal of a prior adjustment\n    :param compare: the direction of the comparison, 1 indicates\n                    we're checking for positive deltas, whereas\n                    -1 indicates negative deltas\n    "
+
+    def _quota_delta(resource):
+        return (sense * (new_flavor[resource] - old_flavor[resource]))
+    deltas = {}
+    if ((compare * _quota_delta('vcpus')) > 0):
+        deltas['cores'] = _quota_delta('vcpus')
+    if ((compare * _quota_delta('memory_mb')) > 0):
+        deltas['ram'] = _quota_delta('memory_mb')
+    return deltas
+
+def upsize_quota_delta(context, new_flavor, old_flavor):
+    'Calculate deltas required to adjust quota for an instance upsize.\n    '
+    return resize_quota_delta(context, new_flavor, old_flavor, 1, 1)
+
+def reverse_upsize_quota_delta(context, instance):
+    'Calculate deltas required to reverse a prior upsizing\n    quota adjustment.\n    '
+    return resize_quota_delta(context, instance.new_flavor, instance.old_flavor, (-1), (-1))
+
+def downsize_quota_delta(context, instance):
+    'Calculate deltas required to adjust quota for an instance downsize.\n    '
+    old_flavor = instance.get_flavor('old')
+    new_flavor = instance.get_flavor('new')
+    return resize_quota_delta(context, new_flavor, old_flavor, 1, (-1))
+
+def reserve_quota_delta(context, deltas, instance):
+    "If there are deltas to reserve, construct a Quotas object and\n    reserve the deltas for the given project.\n\n    :param context:    The nova request context.\n    :param deltas:     A dictionary of the proposed delta changes.\n    :param instance:   The instance we're operating on, so that\n                       quotas can use the correct project_id/user_id.\n    :return: nova.objects.quotas.Quotas\n    "
+    quotas = objects.Quotas(context=context)
+    if deltas:
+        (project_id, user_id) = objects.quotas.ids_from_instance(context, instance)
+        quotas.reserve(project_id=project_id, user_id=user_id, **deltas)
+    return quotas
+
+def get_headroom(quotas, usages, deltas):
+    headroom = {res: (quotas[res] - usages[res]) for res in quotas.keys()}
+    if (quotas.get('cores') == (-1)):
+        if deltas.get('cores'):
+            hc = (headroom.get('instances', 1) * deltas['cores'])
+            headroom['cores'] = (hc / deltas.get('instances', 1))
+        else:
+            headroom['cores'] = headroom.get('instances', 1)
+    if (quotas.get('ram') == (-1)):
+        if deltas.get('ram'):
+            hr = (headroom.get('instances', 1) * deltas['ram'])
+            headroom['ram'] = (hr / deltas.get('instances', 1))
+        else:
+            headroom['ram'] = headroom.get('instances', 1)
+    return headroom
+
+def check_num_instances_quota(context, instance_type, min_count, max_count, project_id=None, user_id=None, orig_num_req=None):
+    'Enforce quota limits on number of instances created.'
+    if (project_id is None):
+        project_id = context.project_id
+    req_cores = (max_count * instance_type.vcpus)
+    req_ram = (max_count * instance_type.memory_mb)
+    deltas = {'instances': max_count, 'cores': req_cores, 'ram': req_ram}
+    try:
+        objects.Quotas.check_deltas(context, deltas, project_id, user_id=user_id, check_project_id=project_id, check_user_id=user_id)
+    except exception.OverQuota as exc:
+        quotas = exc.kwargs['quotas']
+        overs = exc.kwargs['overs']
+        usages = exc.kwargs['usages']
+        if (min_count == max_count == 0):
+            req_cores = (orig_num_req * instance_type.vcpus)
+            req_ram = (orig_num_req * instance_type.memory_mb)
+            requested = {'instances': orig_num_req, 'cores': req_cores, 'ram': req_ram}
+            (overs, reqs, total_alloweds, useds) = get_over_quota_detail(deltas, overs, quotas, requested)
+            msg = 'Cannot run any more instances of this type.'
+            params = {'overs': overs, 'pid': project_id, 'msg': msg}
+            LOG.debug('%(overs)s quota exceeded for %(pid)s. %(msg)s', params)
+            raise exception.TooManyInstances(overs=overs, req=reqs, used=useds, allowed=total_alloweds)
+        headroom = get_headroom(quotas, usages, deltas)
+        allowed = headroom.get('instances', 1)
+        if instance_type.vcpus:
+            allowed = min(allowed, (headroom['cores'] // instance_type.vcpus))
+        if instance_type.memory_mb:
+            allowed = min(allowed, (headroom['ram'] // instance_type.memory_mb))
+        if (allowed <= 0):
+            msg = 'Cannot run any more instances of this type.'
+        elif (min_count <= allowed <= max_count):
+            return check_num_instances_quota(context, instance_type, min_count, allowed, project_id=project_id, user_id=user_id)
+        else:
+            msg = ('Can only run %s more instances of this type.' % allowed)
+        num_instances = (str(min_count) if (min_count == max_count) else ('%s-%s' % (min_count, max_count)))
+        requested = dict(instances=num_instances, cores=req_cores, ram=req_ram)
+        (overs, reqs, total_alloweds, useds) = get_over_quota_detail(headroom, overs, quotas, requested)
+        params = {'overs': overs, 'pid': project_id, 'min_count': min_count, 'max_count': max_count, 'msg': msg}
+        if (min_count == max_count):
+            LOG.debug('%(overs)s quota exceeded for %(pid)s, tried to run %(min_count)d instances. %(msg)s', params)
+        else:
+            LOG.debug('%(overs)s quota exceeded for %(pid)s, tried to run between %(min_count)d and %(max_count)d instances. %(msg)s', params)
+        raise exception.TooManyInstances(overs=overs, req=reqs, used=useds, allowed=total_alloweds)
+    return max_count
+
+def get_over_quota_detail(headroom, overs, quotas, requested):
+    reqs = []
+    useds = []
+    total_alloweds = []
+    for resource in overs:
+        reqs.append(str(requested[resource]))
+        useds.append(str((quotas[resource] - headroom[resource])))
+        total_alloweds.append(str(quotas[resource]))
+    (overs, reqs, useds, total_alloweds) = map(', '.join, (overs, reqs, useds, total_alloweds))
+    return (overs, reqs, total_alloweds, useds)
+
+def remove_shelved_keys_from_system_metadata(instance):
+    for key in ['shelved_at', 'shelved_image_id', 'shelved_host']:
+        if (key in instance.system_metadata):
+            del instance.system_metadata[key]
+
+class EventReporter(object, ):
+    'Context manager to report instance action events.'
+
+    def __init__(self, context, event_name, *instance_uuids):
+        self.context = context
+        self.event_name = event_name
+        self.instance_uuids = instance_uuids
+
+    def __enter__(self):
+        for uuid in self.instance_uuids:
+            objects.InstanceActionEvent.event_start(self.context, uuid, self.event_name, want_result=False)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        for uuid in self.instance_uuids:
+            objects.InstanceActionEvent.event_finish_with_failure(self.context, uuid, self.event_name, exc_val=exc_val, exc_tb=exc_tb, want_result=False)
+        return False
+
+def wrap_instance_event(prefix):
+    'Wraps a method to log the event taken on the instance, and result.\n\n    This decorator wraps a method to log the start and result of an event, as\n    part of an action taken on an instance.\n    '
+
+    @utils.expects_func_args('instance')
+    def helper(function):
+
+        @functools.wraps(function)
+        def decorated_function(self, context, *args, **kwargs):
+            wrapped_func = safe_utils.get_wrapped_function(function)
+            keyed_args = inspect.getcallargs(wrapped_func, self, context, *args, **kwargs)
+            instance_uuid = keyed_args['instance']['uuid']
+            event_name = '{0}_{1}'.format(prefix, function.__name__)
+            with EventReporter(context, event_name, instance_uuid):
+                return function(self, context, *args, **kwargs)
+        return decorated_function
+    return helper
+
+class UnlimitedSemaphore(object, ):
+
+    def __enter__(self):
+        pass
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+    @property
+    def balance(self):
+        return 0
+
+@contextlib.contextmanager
+def notify_about_instance_delete(notifier, context, instance):
+    system_metadata = instance.system_metadata
+    try:
+        notify_about_instance_usage(notifier, context, instance, 'delete.start')
+        (yield)
+    finally:
+        notify_about_instance_usage(notifier, context, instance, 'delete.end', system_metadata=system_metadata)

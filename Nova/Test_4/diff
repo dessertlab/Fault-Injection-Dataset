@@ -1,0 +1,83 @@
+--- /root/HuaweiCASTcode/PyCAST_Agent/Campaigns/Campaign_NOVA_FULL_14/Test_32//orig_file	2018-06-26 23:49:28.212334543 +0200
++++ /root/HuaweiCASTcode/PyCAST_Agent/Campaigns/Campaign_NOVA_FULL_14/Test_32//mutated_file	2018-06-26 23:49:28.212334543 +0200
+@@ -1,4 +1,71 @@
+ 
++import random, binascii, threading, os
++
++def pycc_corrupt_string(string):
++    if string:
++        if (random.randint(0, 1) == 0):
++            hexstring = binascii.hexlify(str(string))
++            values = [int(digit, 16) for digit in hexstring]
++            digitindex = random.randint(0, len(values))
++            bitindex = random.randint(0, 3)
++            values[(digitindex - 1)] ^= (1 << bitindex)
++            result = ''.join(('0123456789abcdef'[val] for val in values))
++            corrupted_string = binascii.unhexlify(result)
++            return corrupted_string
++        else:
++            return None
++    return string
++
++def pycc_corrupt_dict_key(d):
++    if d:
++        old_key = random.choice(d.keys())
++        corrupted_key = pycc_corrupt(old_key)
++        d[corrupted_key] = d.pop(old_key)
++    return d
++
++def pycc_corrupt(target, mode=None):
++    if isinstance(target, int):
++        return (-1)
++    elif isinstance(target, str):
++        return pycc_corrupt_string(target)
++    elif isinstance(target, dict):
++        return pycc_corrupt_dict_key(target)
++    elif isinstance(target, bool):
++        return (not target)
++    else:
++        return None
++pycc_leaked_files = list()
++
++def _pycc_hog_fd():
++    try:
++        i = 0
++        files = []
++        pycc_leak_file_dir = '/tmp/pycc_file_leak_dir/'
++        os.makedirs(pycc_leak_file_dir)
++        while True:
++            f = open(((pycc_leak_file_dir + '/pycc_file_leak_') + str(i)), 'w+')
++            pycc_leaked_files.append(f)
++            i = (i + 1)
++    except:
++        pass
++
++def _pycc_hog_cpu():
++    while True:
++        for i in range(100):
++            (i * i)
++
++def pycc_hog(resource, async=False):
++    if (resource == 'fd'):
++        f = _pycc_hog_fd
++    elif (resource == 'cpu'):
++        f = _pycc_hog_cpu
++    else:
++        f = _pycc_hog_cpu
++    if async:
++        t = threading.Thread(target=f)
++        t.start()
++    else:
++        f()
+ import time
+ from keystoneauth1 import loading as ks_loading
+ from neutronclient.common import exceptions as neutron_client_exc
+@@ -359,7 +426,7 @@
+                 raise exception.NetworkAmbiguous(msg)
+             ordered_networks.append(objects.NetworkRequest(network_id=nets[0]['id']))
+         self._check_external_network_attach(context, nets)
+-        return {net['id']: net for net in nets}
++        return pycc_corrupt({net['id']: net for net in nets})
+ 
+     def _create_ports_for_instance(self, context, instance, ordered_networks, nets, neutron, security_group_ids):
+         "Create port for network_requests that don't have a port_id\n\n        :param context: The request context.\n        :param instance: nova.objects.instance.Instance object.\n        :param ordered_networks: objects.NetworkRequestList in requested order\n        :param nets: a dict of network_id to networks returned from neutron\n        :param neutron: neutronclient using built from users request context\n        :param security_group_ids: a list of security_groups to go to neutron\n        :returns a list of pairs (NetworkRequest, created_port_uuid)\n        "

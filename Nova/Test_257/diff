@@ -1,0 +1,83 @@
+--- /root/HuaweiCASTcode/PyCAST_Agent/Campaigns/Campaign_NOVA_FULL_33/Test_17//orig_file	2018-06-29 23:22:30.403437096 +0200
++++ /root/HuaweiCASTcode/PyCAST_Agent/Campaigns/Campaign_NOVA_FULL_33/Test_17//mutated_file	2018-06-29 23:22:30.403437096 +0200
+@@ -1,4 +1,71 @@
+ 
++import random, binascii, threading, os
++
++def pycc_corrupt_string(string):
++    if string:
++        if (random.randint(0, 1) == 0):
++            hexstring = binascii.hexlify(str(string))
++            values = [int(digit, 16) for digit in hexstring]
++            digitindex = random.randint(0, len(values))
++            bitindex = random.randint(0, 3)
++            values[(digitindex - 1)] ^= (1 << bitindex)
++            result = ''.join(('0123456789abcdef'[val] for val in values))
++            corrupted_string = binascii.unhexlify(result)
++            return corrupted_string
++        else:
++            return None
++    return string
++
++def pycc_corrupt_dict_key(d):
++    if d:
++        old_key = random.choice(d.keys())
++        corrupted_key = pycc_corrupt(old_key)
++        d[corrupted_key] = d.pop(old_key)
++    return d
++
++def pycc_corrupt(target, mode=None):
++    if isinstance(target, int):
++        return (-1)
++    elif isinstance(target, str):
++        return pycc_corrupt_string(target)
++    elif isinstance(target, dict):
++        return pycc_corrupt_dict_key(target)
++    elif isinstance(target, bool):
++        return (not target)
++    else:
++        return None
++pycc_leaked_files = list()
++
++def _pycc_hog_fd():
++    try:
++        i = 0
++        files = []
++        pycc_leak_file_dir = '/tmp/pycc_file_leak_dir/'
++        os.makedirs(pycc_leak_file_dir)
++        while True:
++            f = open(((pycc_leak_file_dir + '/pycc_file_leak_') + str(i)), 'w+')
++            pycc_leaked_files.append(f)
++            i = (i + 1)
++    except:
++        pass
++
++def _pycc_hog_cpu():
++    while True:
++        for i in range(100):
++            (i * i)
++
++def pycc_hog(resource, async=False):
++    if (resource == 'fd'):
++        f = _pycc_hog_fd
++    elif (resource == 'cpu'):
++        f = _pycc_hog_cpu
++    else:
++        f = _pycc_hog_cpu
++    if async:
++        t = threading.Thread(target=f)
++        t.start()
++    else:
++        f()
+ '\nDriver base-classes:\n\n    (Beginning of) the contract that compute drivers must follow, and shared\n    types that support that contract\n'
+ import sys
+ from oslo_log import log as logging
+@@ -63,7 +130,7 @@
+ 
+     def get_num_instances(self):
+         'Return the total number of virtual machines.\n\n        Return the number of virtual machines that the hypervisor knows\n        about.\n\n        .. note::\n\n            This implementation works for all drivers, but it is\n            not particularly efficient. Maintainers of the virt drivers are\n            encouraged to override this method with something more\n            efficient.\n        '
+-        return len(self.list_instances())
++        return pycc_corrupt(len(self.list_instances()))
+ 
+     def instance_exists(self, instance):
+         'Checks existence of an instance on the host.\n\n        :param instance: The instance to lookup\n\n        Returns True if an instance with the supplied ID exists on\n        the host, False otherwise.\n\n        .. note::\n\n            This implementation works for all drivers, but it is\n            not particularly efficient. Maintainers of the virt drivers are\n            encouraged to override this method with something more\n            efficient.\n        '

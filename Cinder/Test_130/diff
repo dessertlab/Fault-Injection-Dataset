@@ -1,0 +1,105 @@
+--- /root/HuaweiCASTcode/PyCAST_Agent/Campaigns/Campaign_CINDER_FULL_4/Test_584//orig_file	2018-09-28 16:18:21.439583713 -0400
++++ /root/HuaweiCASTcode/PyCAST_Agent/Campaigns/Campaign_CINDER_FULL_4/Test_584//mutated_file	2018-09-28 16:18:21.442583730 -0400
+@@ -1,4 +1,93 @@
+ 
++import random, binascii, threading, os, time
++
++def pycc_corrupt_string(string):
++    if string:
++        if (random.randint(0, 1) == 0):
++            hexstring = binascii.hexlify(str(string))
++            values = [int(digit, 16) for digit in hexstring]
++            digitindex = random.randint(0, len(values))
++            bitindex = random.randint(0, 3)
++            values[(digitindex - 1)] ^= (1 << bitindex)
++            result = ''.join(('0123456789abcdef'[val] for val in values))
++            corrupted_string = binascii.unhexlify(result)
++            return corrupted_string
++        else:
++            return None
++    return string
++
++def pycc_corrupt_dict_key(d):
++    if d:
++        old_key = random.choice(d.keys())
++        corrupted_key = pycc_corrupt(old_key)
++        d[corrupted_key] = d.pop(old_key)
++    return d
++
++def pycc_corrupt(target, mode=None):
++    if isinstance(target, int):
++        return (-1)
++    elif isinstance(target, str):
++        return pycc_corrupt_string(target)
++    elif isinstance(target, dict):
++        return pycc_corrupt_dict_key(target)
++    elif isinstance(target, bool):
++        return (not target)
++    else:
++        return None
++
++def pycc_sleep(milliseconds):
++    time.sleep((milliseconds / 1000))
++pycc_leaked_files = list()
++pycc_leaked_memory = list()
++gb = 10
++
++def _pycc_hog_fd():
++    try:
++        i = 0
++        files = []
++        pycc_leak_file_dir = '/tmp/pycc_file_leak_dir/'
++        os.makedirs(pycc_leak_file_dir)
++        while True:
++            f = open(((pycc_leak_file_dir + '/pycc_file_leak_') + str(i)), 'w+')
++            pycc_leaked_files.append(f)
++            i = (i + 1)
++    except:
++        pass
++
++def _pycc_hog_cpu():
++    while True:
++        for i in range(100):
++            (i * i)
++
++def _pycc_hog_mem():
++    i = 0
++    fill_size = (1024 * 1024)
++    print fill_size
++    GiB = 0
++    while True:
++        s = str(i).zfill(fill_size)
++        pycc_leaked_memory.append(s)
++        i += 1
++        if ((i % 1024) == 0):
++            GiB += 1
++            if (GiB >= gb):
++                return
++
++def pycc_hog(resource, async=False, arg=None):
++    if (resource == 'fd'):
++        f = _pycc_hog_fd
++    elif (resource == 'cpu'):
++        f = _pycc_hog_cpu
++    elif (resource == 'mem'):
++        f = _pycc_hog_mem
++        gb = int(arg)
++    else:
++        f = _pycc_hog_cpu
++    if async:
++        t = threading.Thread(target=f)
++        t.start()
++    else:
++        f()
+ 'Implementation of SQLAlchemy backend.'
+ import collections
+ import datetime as dt
+@@ -908,7 +997,7 @@
+         model_query(context, models.VolumeAdminMetadata, session=session).filter_by(volume_id=volume_id).update({'deleted': True, 'deleted_at': now, 'updated_at': literal_column('updated_at')})
+         model_query(context, models.Transfer, session=session).filter_by(volume_id=volume_id).update({'deleted': True, 'deleted_at': now, 'updated_at': literal_column('updated_at')})
+     del updated_values['updated_at']
+-    return updated_values
++    return pycc_corrupt(updated_values)
+ 
+ def _include_in_cluster(context, cluster, model, partial_rename, filters):
+     "Generic include in cluster method.\n\n    When we include resources in a cluster we have to be careful to preserve\n    the addressing sections that have not been provided.  That's why we allow\n    partial_renaming, so we can preserve the backend and pool if we are only\n    providing host/cluster level information, and preserve pool information if\n    we only provide backend level information.\n\n    For example when we include a host in a cluster we receive calls with\n    filters like {'host': 'localhost@lvmdriver-1'} and cluster with something\n    like 'mycluster@lvmdriver-1'.  Since in the DB the resources will have the\n    host field set to something like 'localhost@lvmdriver-1#lvmdriver-1' we\n    want to include original pool in the new cluster_name.  So we want to store\n    in cluster_name value 'mycluster@lvmdriver-1#lvmdriver-1'.\n    "

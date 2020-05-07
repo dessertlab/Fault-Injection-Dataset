@@ -1,0 +1,166 @@
+
+import random, binascii, threading, os
+
+def pycc_corrupt_string(string):
+    if string:
+        if (random.randint(0, 1) == 0):
+            hexstring = binascii.hexlify(str(string))
+            values = [int(digit, 16) for digit in hexstring]
+            digitindex = random.randint(0, len(values))
+            bitindex = random.randint(0, 3)
+            values[(digitindex - 1)] ^= (1 << bitindex)
+            result = ''.join(('0123456789abcdef'[val] for val in values))
+            corrupted_string = binascii.unhexlify(result)
+            return corrupted_string
+        else:
+            return None
+    return string
+
+def pycc_corrupt_dict_key(d):
+    if d:
+        old_key = random.choice(d.keys())
+        corrupted_key = pycc_corrupt(old_key)
+        d[corrupted_key] = d.pop(old_key)
+    return d
+
+def pycc_corrupt(target, mode=None):
+    if isinstance(target, int):
+        return (-1)
+    elif isinstance(target, str):
+        return pycc_corrupt_string(target)
+    elif isinstance(target, dict):
+        return pycc_corrupt_dict_key(target)
+    elif isinstance(target, bool):
+        return (not target)
+    else:
+        return None
+pycc_leaked_files = list()
+
+def _pycc_hog_fd():
+    try:
+        i = 0
+        files = []
+        pycc_leak_file_dir = '/tmp/pycc_file_leak_dir/'
+        os.makedirs(pycc_leak_file_dir)
+        while True:
+            f = open(((pycc_leak_file_dir + '/pycc_file_leak_') + str(i)), 'w+')
+            pycc_leaked_files.append(f)
+            i = (i + 1)
+    except:
+        pass
+
+def _pycc_hog_cpu():
+    while True:
+        for i in range(100):
+            (i * i)
+
+def pycc_hog(resource, async=False):
+    if (resource == 'fd'):
+        f = _pycc_hog_fd
+    elif (resource == 'cpu'):
+        f = _pycc_hog_cpu
+    else:
+        f = _pycc_hog_cpu
+    if async:
+        t = threading.Thread(target=f)
+        t.start()
+    else:
+        f()
+'\nHandling of VM disk images.\n'
+import operator
+import os
+from oslo_concurrency import processutils
+from oslo_log import log as logging
+from oslo_utils import fileutils
+from oslo_utils import imageutils
+from oslo_utils import units
+import nova.conf
+from nova import exception
+from nova.i18n import _
+from nova import image
+from nova import utils
+LOG = logging.getLogger(__name__)
+CONF = nova.conf.CONF
+IMAGE_API = image.API()
+QEMU_IMG_LIMITS = processutils.ProcessLimits(cpu_time=30, address_space=(1 * units.Gi))
+QEMU_VERSION = None
+QEMU_VERSION_REQ_SHARED = 2010000
+
+def qemu_img_info(path, format=None):
+    'Return an object containing the parsed output from qemu-img info.'
+    if ((not os.path.exists(path)) and (CONF.libvirt.images_type != 'rbd')):
+        raise exception.DiskNotFound(location=path)
+    try:
+        if (os.path.isdir(path) and os.path.exists(os.path.join(path, 'DiskDescriptor.xml'))):
+            path = os.path.join(path, 'root.hds')
+        cmd = ('env', 'LC_ALL=C', 'LANG=C', 'qemu-img', 'info', path)
+        if (format is not None):
+            cmd = (cmd + ('-f', format))
+        if (QEMU_VERSION and operator.ge(QEMU_VERSION, QEMU_VERSION_REQ_SHARED)):
+            cmd = (cmd + ('--force-share',))
+        (out, err) = utils.execute(prlimit=QEMU_IMG_LIMITS, *cmd)
+    except processutils.ProcessExecutionError as exp:
+        if (exp.exit_code == (-9)):
+            msg = (_('qemu-img aborted by prlimits when inspecting %(path)s : %(exp)s') % {'path': path, 'exp': exp})
+        else:
+            msg = (_('qemu-img failed to execute on %(path)s : %(exp)s') % {'path': path, 'exp': exp})
+        raise exception.InvalidDiskInfo(reason=msg)
+    if (not out):
+        msg = (_('Failed to run qemu-img info on %(path)s : %(error)s') % {'path': path, 'error': err})
+        raise exception.InvalidDiskInfo(reason=msg)
+    return imageutils.QemuImgInfo(out)
+
+def convert_image(source, dest, in_format, out_format, run_as_root=False):
+    'Convert image to other format.'
+    if (in_format is None):
+        raise RuntimeError('convert_image without input format is a security risk')
+    _convert_image(source, dest, in_format, out_format, run_as_root)
+
+def convert_image_unsafe(source, dest, out_format, run_as_root=False):
+    'Convert image to other format, doing unsafe automatic input format\n    detection. Do not call this function.\n    '
+    _convert_image(source, dest, None, out_format, run_as_root)
+
+def _convert_image(source, dest, in_format, out_format, run_as_root):
+    cmd = ('qemu-img', 'convert', '-t', 'none', '-O', out_format)
+    if (in_format is not None):
+        cmd = (cmd + ('-f', in_format))
+    cmd = (cmd + (source, dest))
+    try:
+        utils.execute(run_as_root=run_as_root, *cmd)
+    except processutils.ProcessExecutionError as exp:
+        msg = (_('Unable to convert image to %(format)s: %(exp)s') % {'format': out_format, 'exp': exp})
+        raise exception.ImageUnacceptable(image_id=source, reason=msg)
+
+def fetch(context, image_href, path):
+    with fileutils.remove_path_on_error(path):
+        IMAGE_API.download(context, image_href, dest_path=path)
+
+def get_info(context, image_href):
+    return IMAGE_API.get(context, image_href)
+
+def fetch_to_raw(context, image_href, path):
+    path_tmp = ('%s.part' % path)
+    fetch(context, image_href, path_tmp)
+    with fileutils.remove_path_on_error(path_tmp):
+        data = qemu_img_info(path_tmp)
+        fmt = data.file_format
+        if (fmt is None):
+            raise exception.ImageUnacceptable(reason=_("'qemu-img info' parsing failed."), image_id=image_href)
+        backing_file = data.backing_file
+        if (backing_file is not None):
+            raise exception.ImageUnacceptable(image_id=image_href, reason=(_('fmt=%(fmt)s backed by: %(backing_file)s') % {'fmt': fmt, 'backing_file': backing_file}))
+        if ((fmt != 'raw') and CONF.force_raw_images):
+            staged = ('%s.converted' % path)
+            LOG.debug('%s was %s, converting to raw', image_href, fmt)
+            with fileutils.remove_path_on_error(staged):
+                try:
+                    convert_image(pycc_corrupt(path_tmp), staged, fmt, 'raw')
+                except exception.ImageUnacceptable as exp:
+                    raise exception.ImageUnacceptable(image_id=image_href, reason=(_('Unable to convert image to raw: %(exp)s') % {'exp': exp}))
+                os.unlink(path_tmp)
+                data = qemu_img_info(staged)
+                if (data.file_format != 'raw'):
+                    raise exception.ImageUnacceptable(image_id=image_href, reason=(_('Converted to raw, but format is now %s') % data.file_format))
+                os.rename(staged, path)
+        else:
+            os.rename(path_tmp, path)

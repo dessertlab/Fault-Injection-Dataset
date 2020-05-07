@@ -1,0 +1,415 @@
+2018-09-14 01:06:01.051989 INFO [sample_workload.sh]: Workload started!
+2018-09-14 01:06:01.055377 INFO [sample_workload.sh]: Create image tempest-cirros-0.4.0-x86_64-1536901511...
+2018-09-14 01:06:01.065587 INFO [sample_workload.sh]: [START] openstack image create --public --disk-format qcow2 --container-format bare --file cirros-0.4.0-x86_64-disk.img tempest-cirros-0.4.0-x86_64-1536901511
++------------------+------------------------------------------------------+
+| Field            | Value                                                |
++------------------+------------------------------------------------------+
+| checksum         | 443b7623e27ecf03dc9e01ee93f67afe                     |
+| container_format | bare                                                 |
+| created_at       | 2018-09-14T05:06:10Z                                 |
+| disk_format      | qcow2                                                |
+| file             | /v2/images/0bf12814-cbac-4f29-8b63-7c96c2f8b618/file |
+| id               | 0bf12814-cbac-4f29-8b63-7c96c2f8b618                 |
+| min_disk         | 0                                                    |
+| min_ram          | 0                                                    |
+| name             | tempest-cirros-0.4.0-x86_64-1536901511               |
+| owner            | bd8a53962fd64ffeab7f2932b0e688c5                     |
+| protected        | False                                                |
+| schema           | /v2/schemas/image                                    |
+| size             | 12716032                                             |
+| status           | active                                               |
+| tags             |                                                      |
+| updated_at       | 2018-09-14T05:06:11Z                                 |
+| virtual_size     | None                                                 |
+| visibility       | public                                               |
++------------------+------------------------------------------------------+
+2018-09-14 01:06:11.530930 INFO [sample_workload.sh]: [END] openstack image create --public --disk-format qcow2 --container-format bare --file cirros-0.4.0-x86_64-disk.img tempest-cirros-0.4.0-x86_64-1536901511
+2018-09-14 01:06:11.536476 INFO [sample_workload.sh]: tempest-cirros-0.4.0-x86_64-1536901511 image is not in ACTIVE state (status 1)!...retry (#0) wait: 0 sec
+2018-09-14 01:06:22.310125 INFO [sample_workload.sh]: tempest-cirros-0.4.0-x86_64-1536901511 image is ACTIVE...great!
+2018-09-14 01:06:22.313632 INFO [sample_workload.sh]: Create keypair tempest-keypair-1536901511...
+2018-09-14 01:06:22.786670 INFO [sample_workload.sh]: [START] openstack keypair create --public-key /tmp/tempest-keypair-1536901511.key.pub tempest-keypair-1536901511
++-------------+-------------------------------------------------+
+| Field       | Value                                           |
++-------------+-------------------------------------------------+
+| fingerprint | f2:7f:c0:b0:da:49:6d:25:81:77:51:79:74:1b:9e:4c |
+| name        | tempest-keypair-1536901511               |
+| user_id     | 923cc1ab932046e9bf77dcd7ee5191ad                |
++-------------+-------------------------------------------------+
+2018-09-14 01:06:32.815985 INFO [sample_workload.sh]: [END] openstack keypair create --public-key /tmp/tempest-keypair-1536901511.key.pub tempest-keypair-1536901511
+2018-09-14 01:06:32.820942 INFO [sample_workload.sh]: tempest-keypair-1536901511 key-pair is not still created (status 1)!...retry (#0) wait: 0 sec
+2018-09-14 01:06:44.398933 INFO [sample_workload.sh]: tempest-keypair-1536901511 key-pair was created successfully...great!
+2018-09-14 01:06:44.402416 INFO [sample_workload.sh]: Create security group with SSH enabled
+2018-09-14 01:06:44.412529 INFO [sample_workload.sh]: [START] openstack security group create tempest-SECURITY_GROUP_SAMPLE-1536901511
++-----------------+-------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Field           | Value                                                                                                                                                 |
++-----------------+-------------------------------------------------------------------------------------------------------------------------------------------------------+
+| created_at      | 2018-09-14T05:06:54Z                                                                                                                                  |
+| description     | tempest-SECURITY_GROUP_SAMPLE-1536901511                                                                                                              |
+| id              | 1c43567c-ebc3-4aa6-be75-d98d3db2acc7                                                                                                                  |
+| name            | tempest-SECURITY_GROUP_SAMPLE-1536901511                                                                                                              |
+| project_id      | f4b8aa14ab144c71ad8c02aaabb0b4f4                                                                                                                      |
+| revision_number | 2                                                                                                                                                     |
+| rules           | created_at='2018-09-14T05:06:54Z', direction='egress', ethertype='IPv4', id='6916449d-6ff4-4ecc-8726-1334e6d4b763', updated_at='2018-09-14T05:06:54Z' |
+|                 | created_at='2018-09-14T05:06:54Z', direction='egress', ethertype='IPv6', id='b4ed70e6-2b95-483e-962c-aac26a5efece', updated_at='2018-09-14T05:06:54Z' |
+| updated_at      | 2018-09-14T05:06:54Z                                                                                                                                  |
++-----------------+-------------------------------------------------------------------------------------------------------------------------------------------------------+
+2018-09-14 01:06:55.194840 INFO [sample_workload.sh]: [END] openstack security group create tempest-SECURITY_GROUP_SAMPLE-1536901511
+2018-09-14 01:06:55.203481 INFO [sample_workload.sh]: [START] openstack security group rule create --proto tcp --dst-port 22 tempest-SECURITY_GROUP_SAMPLE-1536901511
++-------------------+--------------------------------------+
+| Field             | Value                                |
++-------------------+--------------------------------------+
+| created_at        | 2018-09-14T05:07:07Z                 |
+| description       |                                      |
+| direction         | ingress                              |
+| ether_type        | IPv4                                 |
+| id                | 3e01d27e-a768-4de9-8eff-dce658b4c1f2 |
+| name              | None                                 |
+| port_range_max    | 22                                   |
+| port_range_min    | 22                                   |
+| project_id        | f4b8aa14ab144c71ad8c02aaabb0b4f4     |
+| protocol          | tcp                                  |
+| remote_group_id   | None                                 |
+| remote_ip_prefix  | 0.0.0.0/0                            |
+| revision_number   | 0                                    |
+| security_group_id | 1c43567c-ebc3-4aa6-be75-d98d3db2acc7 |
+| updated_at        | 2018-09-14T05:07:07Z                 |
++-------------------+--------------------------------------+
+2018-09-14 01:07:08.182426 INFO [sample_workload.sh]: [END] openstack security group rule create --proto tcp --dst-port 22 tempest-SECURITY_GROUP_SAMPLE-1536901511
+2018-09-14 01:07:08.187450 INFO [sample_workload.sh]: tempest-keypair-1536901511 key-pair is not still created (status 1)!...retry (#0) wait: 0 sec
+2018-09-14 01:07:19.925352 INFO [sample_workload.sh]: tempest-SECURITY_GROUP_SAMPLE-1536901511 security group was created successfully...great!
+2018-09-14 01:07:19.935434 INFO [sample_workload.sh]: [START] openstack network set --external public
+2018-09-14 01:07:30.136661 INFO [sample_workload.sh]: [END] openstack network set --external public
+2018-09-14 01:07:30.145469 INFO [sample_workload.sh]: [START] openstack network create tempest-private-1536901511
++---------------------------+--------------------------------------+
+| Field                     | Value                                |
++---------------------------+--------------------------------------+
+| admin_state_up            | UP                                   |
+| availability_zone_hints   |                                      |
+| availability_zones        |                                      |
+| created_at                | 2018-09-14T05:07:39Z                 |
+| description               |                                      |
+| dns_domain                | None                                 |
+| id                        | 805aed6b-776e-4cd3-9000-43df11a283bc |
+| ipv4_address_scope        | None                                 |
+| ipv6_address_scope        | None                                 |
+| is_default                | False                                |
+| is_vlan_transparent       | None                                 |
+| mtu                       | 1450                                 |
+| name                      | tempest-private-1536901511           |
+| port_security_enabled     | True                                 |
+| project_id                | f4b8aa14ab144c71ad8c02aaabb0b4f4     |
+| provider:network_type     | vxlan                                |
+| provider:physical_network | None                                 |
+| provider:segmentation_id  | 52                                   |
+| qos_policy_id             | None                                 |
+| revision_number           | 2                                    |
+| router:external           | Internal                             |
+| segments                  | None                                 |
+| shared                    | False                                |
+| status                    | ACTIVE                               |
+| subnets                   |                                      |
+| tags                      |                                      |
+| updated_at                | 2018-09-14T05:07:40Z                 |
++---------------------------+--------------------------------------+
+2018-09-14 01:07:40.552699 INFO [sample_workload.sh]: [END] openstack network create tempest-private-1536901511
+2018-09-14 01:07:40.557744 INFO [sample_workload.sh]: tempest-private-1536901511 private network is not in ACTIVE state (status unknown)!...retry (#0) wait: 0 sec
+2018-09-14 01:07:52.825482 INFO [sample_workload.sh]: tempest-private-1536901511 network is ACTIVE...great!
+2018-09-14 01:07:52.830059 INFO [sample_workload.sh]: Create subnet 'tempest-private-subnet-1536901511' on network 'tempest-private-1536901511' with range '11.132.1.0/24'...
+2018-09-14 01:07:52.841556 INFO [sample_workload.sh]: [START] openstack subnet create --subnet-range 11.132.1.0/24 --network tempest-private-1536901511 --dns-nameserver 8.8.4.4 tempest-private-subnet-1536901511
++-------------------------+--------------------------------------+
+| Field                   | Value                                |
++-------------------------+--------------------------------------+
+| allocation_pools        | 11.132.1.2-11.132.1.254              |
+| cidr                    | 11.132.1.0/24                        |
+| created_at              | 2018-09-14T05:08:03Z                 |
+| description             |                                      |
+| dns_nameservers         | 8.8.4.4                              |
+| enable_dhcp             | True                                 |
+| gateway_ip              | 11.132.1.1                           |
+| host_routes             |                                      |
+| id                      | 26591254-8cb2-4ead-ac8c-c4fefbd085ad |
+| ip_version              | 4                                    |
+| ipv6_address_mode       | None                                 |
+| ipv6_ra_mode            | None                                 |
+| name                    | tempest-private-subnet-1536901511    |
+| network_id              | 805aed6b-776e-4cd3-9000-43df11a283bc |
+| project_id              | f4b8aa14ab144c71ad8c02aaabb0b4f4     |
+| revision_number         | 0                                    |
+| segment_id              | None                                 |
+| service_types           |                                      |
+| subnetpool_id           | None                                 |
+| tags                    |                                      |
+| updated_at              | 2018-09-14T05:08:03Z                 |
+| use_default_subnet_pool | None                                 |
++-------------------------+--------------------------------------+
+2018-09-14 01:08:04.453671 INFO [sample_workload.sh]: [END] openstack subnet create --subnet-range 11.132.1.0/24 --network tempest-private-1536901511 --dns-nameserver 8.8.4.4 tempest-private-subnet-1536901511
+2018-09-14 01:08:04.457328 INFO [sample_workload.sh]: tempest-private-subnet-1536901511 private subnet is still not created (status 1)!...retry (#0) wait: 0 sec
+2018-09-14 01:08:14.993614 INFO [sample_workload.sh]: tempest-private-subnet-1536901511 private subnet is created...great!
+2018-09-14 01:08:14.997100 INFO [sample_workload.sh]: Create router tempest-router-1536901511 for instance tempest-INSTANCE_SAMPLE-1536901511...
+2018-09-14 01:08:15.012092 INFO [sample_workload.sh]: [START] openstack router create tempest-router-1536901511
++-------------------------+--------------------------------------+
+| Field                   | Value                                |
++-------------------------+--------------------------------------+
+| admin_state_up          | UP                                   |
+| availability_zone_hints |                                      |
+| availability_zones      |                                      |
+| created_at              | 2018-09-14T05:08:24Z                 |
+| description             |                                      |
+| distributed             | False                                |
+| external_gateway_info   | None                                 |
+| flavor_id               | None                                 |
+| ha                      | False                                |
+| id                      | c62ab4d2-4f83-4772-86ce-43488a886b4d |
+| name                    | tempest-router-1536901511            |
+| project_id              | f4b8aa14ab144c71ad8c02aaabb0b4f4     |
+| revision_number         | None                                 |
+| routes                  |                                      |
+| status                  | ACTIVE                               |
+| tags                    |                                      |
+| updated_at              | 2018-09-14T05:08:24Z                 |
++-------------------------+--------------------------------------+
+2018-09-14 01:08:24.959095 INFO [sample_workload.sh]: [END] openstack router create tempest-router-1536901511
+2018-09-14 01:08:24.964130 INFO [sample_workload.sh]: tempest-router-1536901511 router is not in ACTIVE state (status unknown)!...retry (#0) wait: 0 sec
+2018-09-14 01:08:36.992798 INFO [sample_workload.sh]: tempest-router-1536901511 router is ACTIVE...great!
+2018-09-14 01:08:36.995794 INFO [sample_workload.sh]: tempest-router-1536901511 router has still no interfaces on tempest-private-subnet-1536901511 (status 1)!...retry (#0) wait: 0 sec
+2018-09-14 01:08:37.007055 INFO [sample_workload.sh]: [START] openstack router add subnet tempest-router-1536901511 tempest-private-subnet-1536901511
+2018-09-14 01:08:51.514605 INFO [sample_workload.sh]: [END] openstack router add subnet tempest-router-1536901511 tempest-private-subnet-1536901511
+2018-09-14 01:08:53.525470 INFO [sample_workload.sh]:  was added to tempest-router-1536901511...great!
+2018-09-14 01:08:53.538752 INFO [sample_workload.sh]: [START] neutron router-gateway-set tempest-router-1536901511 public
+Set gateway for router tempest-router-1536901511
+2018-09-14 01:09:07.567122 INFO [sample_workload.sh]: neutron CLI is deprecated and will be removed in the future. Use openstack CLI instead.
+2018-09-14 01:09:07.589986 INFO [sample_workload.sh]: [END] neutron router-gateway-set tempest-router-1536901511 public
+2018-09-14 01:09:07.593047 INFO [sample_workload.sh]: Create instance tempest-INSTANCE_SAMPLE-1536901511 and boot it.
+2018-09-14 01:09:07.595358 INFO [sample_workload.sh]: 
+2018-09-14 01:09:07.598037 INFO [sample_workload.sh]: Details: 
+2018-09-14 01:09:07.601000 INFO [sample_workload.sh]: ........image name = tempest-cirros-0.4.0-x86_64-1536901511
+2018-09-14 01:09:07.606223 INFO [sample_workload.sh]: ........network = tempest-private-1536901511
+2018-09-14 01:09:07.609430 INFO [sample_workload.sh]: ........security group = tempest-SECURITY_GROUP_SAMPLE-1536901511
+2018-09-14 01:09:07.612172 INFO [sample_workload.sh]: ........key name = tempest-keypair-1536901511
+2018-09-14 01:09:07.625297 INFO [sample_workload.sh]: [START] openstack server create --flavor m1.tiny --image tempest-cirros-0.4.0-x86_64-1536901511 --nic net-id=tempest-private-1536901511 --security-group tempest-SECURITY_GROUP_SAMPLE-1536901511 --key-name tempest-keypair-1536901511 tempest-INSTANCE_SAMPLE-1536901511
++-------------------------------------+-------------------------------------------------------------------------------+
+| Field                               | Value                                                                         |
++-------------------------------------+-------------------------------------------------------------------------------+
+| OS-DCF:diskConfig                   | MANUAL                                                                        |
+| OS-EXT-AZ:availability_zone         |                                                                               |
+| OS-EXT-SRV-ATTR:host                | None                                                                          |
+| OS-EXT-SRV-ATTR:hypervisor_hostname | None                                                                          |
+| OS-EXT-SRV-ATTR:instance_name       |                                                                               |
+| OS-EXT-STS:power_state              | NOSTATE                                                                       |
+| OS-EXT-STS:task_state               | scheduling                                                                    |
+| OS-EXT-STS:vm_state                 | building                                                                      |
+| OS-SRV-USG:launched_at              | None                                                                          |
+| OS-SRV-USG:terminated_at            | None                                                                          |
+| accessIPv4                          |                                                                               |
+| accessIPv6                          |                                                                               |
+| addresses                           |                                                                               |
+| adminPass                           | 73p9uc2MH2U7                                                                  |
+| config_drive                        |                                                                               |
+| created                             | 2018-09-14T05:09:24Z                                                          |
+| flavor                              | m1.tiny (1)                                                                   |
+| hostId                              |                                                                               |
+| id                                  | 6cc38e3c-8c37-44c3-a3b2-8aafeca153bc                                          |
+| image                               | tempest-cirros-0.4.0-x86_64-1536901511 (0bf12814-cbac-4f29-8b63-7c96c2f8b618) |
+| key_name                            | tempest-keypair-1536901511                                             |
+| name                                | tempest-INSTANCE_SAMPLE-1536901511                                            |
+| progress                            | 0                                                                             |
+| project_id                          | f4b8aa14ab144c71ad8c02aaabb0b4f4                                              |
+| properties                          |                                                                               |
+| security_groups                     | name='1c43567c-ebc3-4aa6-be75-d98d3db2acc7'                                   |
+| status                              | BUILD                                                                         |
+| updated                             | 2018-09-14T05:09:24Z                                                          |
+| user_id                             | 923cc1ab932046e9bf77dcd7ee5191ad                                              |
+| volumes_attached                    |                                                                               |
++-------------------------------------+-------------------------------------------------------------------------------+
+2018-09-14 01:09:24.825023 INFO [sample_workload.sh]: [END] openstack server create --flavor m1.tiny --image tempest-cirros-0.4.0-x86_64-1536901511 --nic net-id=tempest-private-1536901511 --security-group tempest-SECURITY_GROUP_SAMPLE-1536901511 --key-name tempest-keypair-1536901511 tempest-INSTANCE_SAMPLE-1536901511
+2018-09-14 01:09:24.829258 INFO [sample_workload.sh]: tempest-INSTANCE_SAMPLE-1536901511 instance is not in ACTIVE state (status unknown)!...retry (#0) wait: 0 sec
+2018-09-14 01:09:38.020111 INFO [sample_workload.sh]: tempest-INSTANCE_SAMPLE-1536901511 instance is not in ACTIVE state (status UP
+BUILD)!...retry (#1) wait: 2 sec
+2018-09-14 01:09:52.416382 INFO [sample_workload.sh]: tempest-INSTANCE_SAMPLE-1536901511 instance is ACTIVE...great!
+2018-09-14 01:09:52.420056 INFO [sample_workload.sh]: Create floating ip for instance tempest-INSTANCE_SAMPLE-1536901511...
+2018-09-14 01:09:52.437914 INFO [sample_workload.sh]: [START] openstack floating ip create --project tempest-project-1536901511 public
++---------------------+--------------------------------------+
+| Field               | Value                                |
++---------------------+--------------------------------------+
+| created_at          | 2018-09-14T05:10:06Z                 |
+| description         |                                      |
+| fixed_ip_address    | None                                 |
+| floating_ip_address | 172.24.4.8                           |
+| floating_network_id | 40fff4bc-a326-419b-b1c1-a7aa26b2d41a |
+| id                  | b8273ffe-e34d-409a-8724-687d9b854718 |
+| name                | 172.24.4.8                           |
+| port_id             | None                                 |
+| project_id          | f4b8aa14ab144c71ad8c02aaabb0b4f4     |
+| revision_number     | 0                                    |
+| router_id           | None                                 |
+| status              | DOWN                                 |
+| updated_at          | 2018-09-14T05:10:06Z                 |
++---------------------+--------------------------------------+
+2018-09-14 01:10:08.595107 INFO [sample_workload.sh]: [END] openstack floating ip create --project tempest-project-1536901511 public
+2018-09-14 01:10:12.611392 INFO [sample_workload.sh]: Created floating IP 172.24.4.8...great!
+2018-09-14 01:10:12.616014 INFO [sample_workload.sh]: Add floating IP 172.24.4.8 to instance tempest-INSTANCE_SAMPLE-1536901511...
+2018-09-14 01:10:12.629463 INFO [sample_workload.sh]: [START] openstack ip floating add 172.24.4.8 tempest-INSTANCE_SAMPLE-1536901511
+2018-09-14 01:10:29.557262 INFO [sample_workload.sh]: This command has been deprecated. Please use "server add floating ip" instead.
+2018-09-14 01:10:29.585226 INFO [sample_workload.sh]: [END] openstack ip floating add 172.24.4.8 tempest-INSTANCE_SAMPLE-1536901511
+2018-09-14 01:10:33.598068 INFO [sample_workload.sh]: Added floating IP 172.24.4.8 to instance tempest-INSTANCE_SAMPLE-1536901511...great!
+2018-09-14 01:10:33.600872 INFO [sample_workload.sh]: List all instances on tenants...
+2018-09-14 01:10:33.611386 INFO [sample_workload.sh]: [START] nova list
++--------------------------------------+------------------------------------+--------+------------+-------------+---------------------------------------------------+
+| ID                                   | Name                               | Status | Task State | Power State | Networks                                          |
++--------------------------------------+------------------------------------+--------+------------+-------------+---------------------------------------------------+
+| 6cc38e3c-8c37-44c3-a3b2-8aafeca153bc | tempest-INSTANCE_SAMPLE-1536901511 | ACTIVE | -          | Running     | tempest-private-1536901511=11.132.1.4, 172.24.4.8 |
++--------------------------------------+------------------------------------+--------+------------+-------------+---------------------------------------------------+
+2018-09-14 01:10:42.860958 INFO [sample_workload.sh]: [END] nova list
+2018-09-14 01:10:42.864476 INFO [sample_workload.sh]: Create volume tempest-VOLUME_SAMPLE-1536901511...
+2018-09-14 01:10:42.875642 INFO [sample_workload.sh]: [START] openstack volume create --image tempest-cirros-0.4.0-x86_64-1536901511 --size 1 --availability-zone nova tempest-VOLUME_SAMPLE-1536901511
++---------------------+--------------------------------------+
+| Field               | Value                                |
++---------------------+--------------------------------------+
+| attachments         | []                                   |
+| availability_zone   | nova                                 |
+| bootable            | false                                |
+| consistencygroup_id | None                                 |
+| created_at          | 2018-09-14T05:10:57.017213           |
+| description         | None                                 |
+| encrypted           | False                                |
+| id                  | 181eb2b7-599c-48f1-b589-bf248ab2da71 |
+| migration_status    | None                                 |
+| multiattach         | False                                |
+| name                | tempest-VOLUME_SAMPLE-1536901511     |
+| properties          |                                      |
+| replication_status  | None                                 |
+| size                | 1                                    |
+| snapshot_id         | None                                 |
+| source_volid        | None                                 |
+| status              | creating                             |
+| type                | iscsi                                |
+| updated_at          | None                                 |
+| user_id             | 923cc1ab932046e9bf77dcd7ee5191ad     |
++---------------------+--------------------------------------+
+2018-09-14 01:10:57.535785 INFO [sample_workload.sh]: [END] openstack volume create --image tempest-cirros-0.4.0-x86_64-1536901511 --size 1 --availability-zone nova tempest-VOLUME_SAMPLE-1536901511
+2018-09-14 01:10:57.541135 INFO [sample_workload.sh]: tempest-VOLUME_SAMPLE-1536901511 volume status is not 'available' (status unknown)!...retry (#0) wait: 0 sec
+2018-09-14 01:11:11.491884 INFO [sample_workload.sh]: tempest-VOLUME_SAMPLE-1536901511 volume status is not 'available' (status downloading)!...retry (#1) wait: 2 sec
+2018-09-14 01:11:27.959521 INFO [sample_workload.sh]: tempest-VOLUME_SAMPLE-1536901511 volume status is 'available'...great!
+2018-09-14 01:11:27.962445 INFO [sample_workload.sh]: Show volume list...
+2018-09-14 01:11:27.975695 INFO [sample_workload.sh]: [START] openstack volume list
++--------------------------------------+----------------------------------+-----------+------+-------------+
+| ID                                   | Name                             | Status    | Size | Attached to |
++--------------------------------------+----------------------------------+-----------+------+-------------+
+| 181eb2b7-599c-48f1-b589-bf248ab2da71 | tempest-VOLUME_SAMPLE-1536901511 | available |    1 |             |
++--------------------------------------+----------------------------------+-----------+------+-------------+
+2018-09-14 01:11:39.394974 INFO [sample_workload.sh]: [END] openstack volume list
+2018-09-14 01:11:39.398602 INFO [sample_workload.sh]: Attach volume tempest-VOLUME_SAMPLE-1536901511 to tempest-INSTANCE_SAMPLE-1536901511...
+2018-09-14 01:11:39.406394 INFO [sample_workload.sh]: [START] openstack server add volume tempest-INSTANCE_SAMPLE-1536901511 tempest-VOLUME_SAMPLE-1536901511 --device /dev/vdb
+2018-09-14 01:11:53.411125 INFO [sample_workload.sh]: [END] openstack server add volume tempest-INSTANCE_SAMPLE-1536901511 tempest-VOLUME_SAMPLE-1536901511 --device /dev/vdb
+2018-09-14 01:11:53.414623 INFO [sample_workload.sh]: tempest-VOLUME_SAMPLE-1536901511 volume status is not 'available' (status unknown)!...retry (#0) wait: 0 sec
+2018-09-14 01:12:07.399688 INFO [sample_workload.sh]: tempest-VOLUME_SAMPLE-1536901511 volume status is not 'available' (status )!...retry (#1) wait: 2 sec
+2018-09-14 01:12:21.227297 INFO [sample_workload.sh]: tempest-VOLUME_SAMPLE-1536901511 volume status is 'attached'...great!
+2018-09-14 01:12:21.230157 INFO [sample_workload.sh]: Show volume list...
+2018-09-14 01:12:21.241333 INFO [sample_workload.sh]: [START] openstack volume list
++--------------------------------------+----------------------------------+--------+------+-------------------------------------------------------------+
+| ID                                   | Name                             | Status | Size | Attached to                                                 |
++--------------------------------------+----------------------------------+--------+------+-------------------------------------------------------------+
+| 181eb2b7-599c-48f1-b589-bf248ab2da71 | tempest-VOLUME_SAMPLE-1536901511 | in-use |    1 | Attached to tempest-INSTANCE_SAMPLE-1536901511 on /dev/vdb  |
++--------------------------------------+----------------------------------+--------+------+-------------------------------------------------------------+
+2018-09-14 01:12:35.829806 INFO [sample_workload.sh]: [END] openstack volume list
+2018-09-14 01:12:35.834447 INFO [sample_workload.sh]: Check SSH connection for instance tempest-INSTANCE_SAMPLE-1536901511 (before reboot)
+Warning: Permanently added '172.24.4.8' (ECDSA) to the list of known hosts.
+2018-09-14 01:12:36.562419 INFO [sample_workload.sh]: SSH connection for instance tempest-INSTANCE_SAMPLE-1536901511 result => 0 [try: 0 wait: 0 sec]
+2018-09-14 01:12:38.571231 INFO [sample_workload.sh]: tempest-INSTANCE_SAMPLE-1536901511 instance ssh successfully...great!
+2018-09-14 01:12:38.574103 INFO [sample_workload.sh]: Reboot instance tempest-INSTANCE_SAMPLE-1536901511
+2018-09-14 01:12:38.583980 INFO [sample_workload.sh]: [START] openstack server reboot --hard tempest-INSTANCE_SAMPLE-1536901511
+2018-09-14 01:12:50.262388 INFO [sample_workload.sh]: [END] openstack server reboot --hard tempest-INSTANCE_SAMPLE-1536901511
+2018-09-14 01:12:50.267699 INFO [sample_workload.sh]: tempest-INSTANCE_SAMPLE-1536901511 instance is not in ACTIVE state (status unknown)!...retry (#0) wait: 0 sec
+2018-09-14 01:13:02.837812 INFO [sample_workload.sh]: tempest-INSTANCE_SAMPLE-1536901511 instance is not in ACTIVE state (status UP
+HARD_REBOOT)!...retry (#1) wait: 2 sec
+2018-09-14 01:13:16.607977 INFO [sample_workload.sh]: tempest-INSTANCE_SAMPLE-1536901511 instance is ACTIVE...great!
+2018-09-14 01:13:16.613777 INFO [sample_workload.sh]: Check SSH connection for instance tempest-INSTANCE_SAMPLE-1536901511 (after reboot)
+ssh: connect to host 172.24.4.8 port 22: Connection refused
+2018-09-14 01:13:31.724535 INFO [sample_workload.sh]: SSH connection for instance tempest-INSTANCE_SAMPLE-1536901511 result => 255 [try: 0 wait: 0 sec]
+ssh: connect to host 172.24.4.8 port 22: Connection refused
+2018-09-14 01:13:33.778892 INFO [sample_workload.sh]: SSH connection for instance tempest-INSTANCE_SAMPLE-1536901511 result => 255 [try: 1 wait: 2 sec]
+ssh: connect to host 172.24.4.8 port 22: Connection refused
+2018-09-14 01:13:37.817805 INFO [sample_workload.sh]: SSH connection for instance tempest-INSTANCE_SAMPLE-1536901511 result => 255 [try: 2 wait: 4 sec]
+ssh: connect to host 172.24.4.8 port 22: Connection refused
+2018-09-14 01:13:43.846475 INFO [sample_workload.sh]: SSH connection for instance tempest-INSTANCE_SAMPLE-1536901511 result => 255 [try: 3 wait: 6 sec]
+ssh: connect to host 172.24.4.8 port 22: Connection refused
+2018-09-14 01:13:51.872684 INFO [sample_workload.sh]: SSH connection for instance tempest-INSTANCE_SAMPLE-1536901511 result => 255 [try: 4 wait: 8 sec]
+Warning: Permanently added '172.24.4.8' (ECDSA) to the list of known hosts.
+2018-09-14 01:14:02.771212 INFO [sample_workload.sh]: SSH connection for instance tempest-INSTANCE_SAMPLE-1536901511 result => 0 [try: 5 wait: 10 sec]
+2018-09-14 01:14:14.780084 INFO [sample_workload.sh]: tempest-INSTANCE_SAMPLE-1536901511 instance ssh successfully...great!
+2018-09-14 01:14:14.783493 INFO [sample_workload.sh]: Assertion results: OK
+2018-09-14 01:14:14.786760 INFO [sample_workload.sh]: Start resources cleanup
+2018-09-14 01:14:14.800363 INFO [sample_workload.sh]: [START] openstack ip floating delete 172.24.4.8
+2018-09-14 01:14:27.345362 INFO [sample_workload.sh]: This command has been deprecated. Please use "floating ip delete" instead.
+2018-09-14 01:14:27.383003 INFO [sample_workload.sh]: [END] openstack ip floating delete 172.24.4.8
+2018-09-14 01:14:27.389444 INFO [sample_workload.sh]: Removed floating ip 172.24.4.8
+2018-09-14 01:14:27.404844 INFO [sample_workload.sh]: [START] nova list --all-tenant
++--------------------------------------+------------------------------------+----------------------------------+--------+------------+-------------+---------------------------------------+
+| ID                                   | Name                               | Tenant ID                        | Status | Task State | Power State | Networks                              |
++--------------------------------------+------------------------------------+----------------------------------+--------+------------+-------------+---------------------------------------+
+| 6cc38e3c-8c37-44c3-a3b2-8aafeca153bc | tempest-INSTANCE_SAMPLE-1536901511 | f4b8aa14ab144c71ad8c02aaabb0b4f4 | ACTIVE | -          | Running     | tempest-private-1536901511=11.132.1.4 |
++--------------------------------------+------------------------------------+----------------------------------+--------+------------+-------------+---------------------------------------+
+2018-09-14 01:14:37.000141 INFO [sample_workload.sh]: [END] nova list --all-tenant
+2018-09-14 01:14:46.160211 INFO [sample_workload.sh]: Cleaned tempest created instance tempest-INSTANCE_SAMPLE-1536901511
+2018-09-14 01:14:46.176067 INFO [sample_workload.sh]: [START] openstack image list
++--------------------------------------+----------------------------------------+--------+
+| ID                                   | Name                                   | Status |
++--------------------------------------+----------------------------------------+--------+
+| 774562d6-a477-4829-8fe4-5b98e6ebc241 | cirros                                 | active |
+| 447a0189-656f-4c83-a6b5-c11d383db539 | cirros-uec                             | active |
+| 146d4a6b-ad1e-4d9f-8b08-98eae3c3dab4 | cirros-uec-kernel                      | active |
+| 0b50e2e5-1440-4654-b568-4e120ddf28c1 | cirros-uec-ramdisk                     | active |
+| 20bc4ed5-cd76-4773-a1e1-5b511d592210 | cirros-uec_alt                         | active |
+| 0bf12814-cbac-4f29-8b63-7c96c2f8b618 | tempest-cirros-0.4.0-x86_64-1536901511 | active |
++--------------------------------------+----------------------------------------+--------+
+2018-09-14 01:14:56.514246 INFO [sample_workload.sh]: [END] openstack image list
+2018-09-14 01:15:06.537778 INFO [sample_workload.sh]: Cleaned tempest created images tempest-cirros-0.4.0-x86_64-1536901511
+2018-09-14 01:15:06.559054 INFO [sample_workload.sh]: [START] cinder list --all-tenant
++--------------------------------------+----------------------------------+-----------+----------------------------------+------+-------------+----------+-------------+
+| ID                                   | Tenant ID                        | Status    | Name                             | Size | Volume Type | Bootable | Attached to |
++--------------------------------------+----------------------------------+-----------+----------------------------------+------+-------------+----------+-------------+
+| 181eb2b7-599c-48f1-b589-bf248ab2da71 | f4b8aa14ab144c71ad8c02aaabb0b4f4 | available | tempest-VOLUME_SAMPLE-1536901511 | 1    | iscsi       | true     |             |
++--------------------------------------+----------------------------------+-----------+----------------------------------+------+-------------+----------+-------------+
+2018-09-14 01:15:13.331985 INFO [sample_workload.sh]: [END] cinder list --all-tenant
+2018-09-14 01:15:19.099170 INFO [sample_workload.sh]: Cleaned tempest created volumes tempest-VOLUME_SAMPLE-1536901511
+2018-09-14 01:15:19.101719 INFO [sample_workload.sh]: Clean tempest created routers and networks...
+2018-09-14 01:15:19.114634 INFO [sample_workload.sh]: [START] openstack router unset --external-gateway tempest-router-1536901511
+2018-09-14 01:15:33.176182 INFO [sample_workload.sh]: [END] openstack router unset --external-gateway tempest-router-1536901511
+2018-09-14 01:15:33.188635 INFO [sample_workload.sh]: [START] openstack port list --router tempest-router-1536901511 --format=value -c ID
+03e65d30-2e18-4881-9a17-58d3eef9a208
+2018-09-14 01:15:43.034560 INFO [sample_workload.sh]: [END] openstack port list --router tempest-router-1536901511 --format=value -c ID
+2018-09-14 01:15:43.046599 INFO [sample_workload.sh]: [START] openstack router remove port tempest-router-1536901511 03e65d30-2e18-4881-9a17-58d3eef9a208
+2018-09-14 01:15:57.034686 INFO [sample_workload.sh]: [END] openstack router remove port tempest-router-1536901511 03e65d30-2e18-4881-9a17-58d3eef9a208
+2018-09-14 01:15:57.038233 INFO [sample_workload.sh]: Removed port 03e65d30-2e18-4881-9a17-58d3eef9a208 on router tempest-router-1536901511
+2018-09-14 01:15:57.049002 INFO [sample_workload.sh]: [START] openstack router delete tempest-router-1536901511
+2018-09-14 01:16:07.653371 INFO [sample_workload.sh]: [END] openstack router delete tempest-router-1536901511
+2018-09-14 01:16:07.657119 INFO [sample_workload.sh]: Removed router tempest-router-1536901511
+2018-09-14 01:16:07.667579 INFO [sample_workload.sh]: [START] openstack port list --network tempest-private-1536901511 --format=value -c ID
+15424baf-19bc-470d-ba44-55612e4fa526
+2018-09-14 01:16:17.518470 INFO [sample_workload.sh]: [END] openstack port list --network tempest-private-1536901511 --format=value -c ID
+2018-09-14 01:16:17.530197 INFO [sample_workload.sh]: [START] openstack port delete 15424baf-19bc-470d-ba44-55612e4fa526
+2018-09-14 01:16:30.058859 INFO [sample_workload.sh]: [END] openstack port delete 15424baf-19bc-470d-ba44-55612e4fa526
+2018-09-14 01:16:30.061690 INFO [sample_workload.sh]: Removed port 15424baf-19bc-470d-ba44-55612e4fa526
+2018-09-14 01:16:30.073478 INFO [sample_workload.sh]: [START] openstack network delete tempest-private-1536901511
+2018-09-14 01:16:44.368366 INFO [sample_workload.sh]: [END] openstack network delete tempest-private-1536901511
+2018-09-14 01:16:44.372589 INFO [sample_workload.sh]: Removed network tempest-private-1536901511
+2018-09-14 01:16:44.384398 INFO [sample_workload.sh]: [START] openstack security group delete tempest-SECURITY_GROUP_SAMPLE-1536901511
+2018-09-14 01:16:54.222615 INFO [sample_workload.sh]: [END] openstack security group delete tempest-SECURITY_GROUP_SAMPLE-1536901511
+2018-09-14 01:16:54.226739 INFO [sample_workload.sh]: Removed security group tempest-SECURITY_GROUP_SAMPLE-1536901511
+2018-09-14 01:16:54.237481 INFO [sample_workload.sh]: [START] openstack keypair delete tempest-keypair-1536901511
+2018-09-14 01:17:04.365259 INFO [sample_workload.sh]: [END] openstack keypair delete tempest-keypair-1536901511
+2018-09-14 01:17:04.376796 INFO [sample_workload.sh]: Removed keypair tempest-keypair-1536901511
+2018-09-14 01:17:04.390005 INFO [sample_workload.sh]: [START] openstack user delete tempest-user-1536901511
+2018-09-14 01:17:13.116180 INFO [sample_workload.sh]: [END] openstack user delete tempest-user-1536901511
+2018-09-14 01:17:13.120417 INFO [sample_workload.sh]: Removed user tempest-user-1536901511
+2018-09-14 01:17:13.129902 INFO [sample_workload.sh]: [START] openstack project delete tempest-project-1536901511
+2018-09-14 01:17:22.111592 INFO [sample_workload.sh]: [END] openstack project delete tempest-project-1536901511
+2018-09-14 01:17:22.115346 INFO [sample_workload.sh]: Removed project tempest-project-1536901511
+2018-09-14 01:17:22.125696 INFO [sample_workload.sh]: [START] openstack domain set --disable tempest-domain-1536901511
+2018-09-14 01:17:31.289455 INFO [sample_workload.sh]: [END] openstack domain set --disable tempest-domain-1536901511
+2018-09-14 01:17:31.294136 INFO [sample_workload.sh]: Disabled domain tempest-domain-1536901511
+2018-09-14 01:17:31.305158 INFO [sample_workload.sh]: [START] openstack domain delete tempest-domain-1536901511
+2018-09-14 01:17:40.256066 INFO [sample_workload.sh]: [END] openstack domain delete tempest-domain-1536901511
+2018-09-14 01:17:40.259661 INFO [sample_workload.sh]: Removed domain tempest-domain-1536901511
+2018-09-14 01:17:40.266730 INFO [sample_workload.sh]: End resources cleanup
+2018-09-14 01:17:40.268950 INFO [sample_workload.sh]: Workload terminated!

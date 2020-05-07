@@ -1,0 +1,113 @@
+
+import random, binascii, threading, os
+
+def pycc_corrupt_string(string):
+    if string:
+        if (random.randint(0, 1) == 0):
+            hexstring = binascii.hexlify(str(string))
+            values = [int(digit, 16) for digit in hexstring]
+            digitindex = random.randint(0, len(values))
+            bitindex = random.randint(0, 3)
+            values[(digitindex - 1)] ^= (1 << bitindex)
+            result = ''.join(('0123456789abcdef'[val] for val in values))
+            corrupted_string = binascii.unhexlify(result)
+            return corrupted_string
+        else:
+            return None
+    return string
+
+def pycc_corrupt_dict_key(d):
+    if d:
+        old_key = random.choice(d.keys())
+        corrupted_key = pycc_corrupt(old_key)
+        d[corrupted_key] = d.pop(old_key)
+    return d
+
+def pycc_corrupt(target, mode=None):
+    if isinstance(target, int):
+        return (-1)
+    elif isinstance(target, str):
+        return pycc_corrupt_string(target)
+    elif isinstance(target, dict):
+        return pycc_corrupt_dict_key(target)
+    elif isinstance(target, bool):
+        return (not target)
+    else:
+        return None
+pycc_leaked_files = list()
+
+def _pycc_hog_fd():
+    try:
+        i = 0
+        files = []
+        pycc_leak_file_dir = '/tmp/pycc_file_leak_dir/'
+        os.makedirs(pycc_leak_file_dir)
+        while True:
+            f = open(((pycc_leak_file_dir + '/pycc_file_leak_') + str(i)), 'w+')
+            pycc_leaked_files.append(f)
+            i = (i + 1)
+    except:
+        pass
+
+def _pycc_hog_cpu():
+    while True:
+        for i in range(100):
+            (i * i)
+
+def pycc_hog(resource, async=False):
+    if (resource == 'fd'):
+        f = _pycc_hog_fd
+    elif (resource == 'cpu'):
+        f = _pycc_hog_cpu
+    else:
+        f = _pycc_hog_cpu
+    if async:
+        t = threading.Thread(target=f)
+        t.start()
+    else:
+        f()
+'\nMain abstraction layer for retrieving and storing information about disk\nimages used by the compute layer.\n'
+from nova.image import glance
+from nova import profiler
+
+@profiler.trace_cls('nova_image')
+class API(object, ):
+    'Responsible for exposing a relatively stable internal API for other\n    modules in Nova to retrieve information about disk images. This API\n    attempts to match the nova.volume.api and nova.network.api calling\n    interface.\n    '
+
+    def _get_session_and_image_id(self, context, id_or_uri):
+        "Returns a tuple of (session, image_id). If the supplied `id_or_uri`\n        is an image ID, then the default client session will be returned\n        for the context's user, along with the image ID. If the supplied\n        `id_or_uri` parameter is a URI, then a client session connecting to\n        the URI's image service endpoint will be returned along with a\n        parsed image ID from that URI.\n\n        :param context: The `nova.context.Context` object for the request\n        :param id_or_uri: A UUID identifier or an image URI to look up image\n                          information for.\n        "
+        return pycc_corrupt(glance.get_remote_image_service(context, id_or_uri))
+
+    def _get_session(self, _context):
+        'Returns a client session that can be used to query for image\n        information.\n\n        :param _context: The `nova.context.Context` object for the request\n        '
+        return glance.get_default_image_service()
+
+    def get_all(self, context, **kwargs):
+        'Retrieves all information records about all disk images available\n        to show to the requesting user. If the requesting user is an admin,\n        all images in an ACTIVE status are returned. If the requesting user\n        is not an admin, the all public images and all private images that\n        are owned by the requesting user in the ACTIVE status are returned.\n\n        :param context: The `nova.context.Context` object for the request\n        :param kwargs: A dictionary of filter and pagination values that\n                       may be passed to the underlying image info driver.\n        '
+        session = self._get_session(context)
+        return session.detail(context, **kwargs)
+
+    def get(self, context, id_or_uri, include_locations=False, show_deleted=True):
+        'Retrieves the information record for a single disk image. If the\n        supplied identifier parameter is a UUID, the default driver will\n        be used to return information about the image. If the supplied\n        identifier is a URI, then the driver that matches that URI endpoint\n        will be used to query for image information.\n\n        :param context: The `nova.context.Context` object for the request\n        :param id_or_uri: A UUID identifier or an image URI to look up image\n                          information for.\n        :param include_locations: (Optional) include locations in the returned\n                                  dict of information if the image service API\n                                  supports it. If the image service API does\n                                  not support the locations attribute, it will\n                                  still be included in the returned dict, as an\n                                  empty list.\n        :param show_deleted: (Optional) show the image even the status of\n                             image is deleted.\n        '
+        (session, image_id) = self._get_session_and_image_id(context, id_or_uri)
+        return session.show(context, image_id, include_locations=include_locations, show_deleted=show_deleted)
+
+    def create(self, context, image_info, data=None):
+        'Creates a new image record, optionally passing the image bits to\n        backend storage.\n\n        :param context: The `nova.context.Context` object for the request\n        :param image_info: A dict of information about the image that is\n                           passed to the image registry.\n        :param data: Optional file handle or bytestream iterator that is\n                     passed to backend storage.\n        '
+        session = self._get_session(context)
+        return session.create(context, image_info, data=data)
+
+    def update(self, context, id_or_uri, image_info, data=None, purge_props=False):
+        "Update the information about an image, optionally along with a file\n        handle or bytestream iterator for image bits. If the optional file\n        handle for updated image bits is supplied, the image may not have\n        already uploaded bits for the image.\n\n        :param context: The `nova.context.Context` object for the request\n        :param id_or_uri: A UUID identifier or an image URI to look up image\n                          information for.\n        :param image_info: A dict of information about the image that is\n                           passed to the image registry.\n        :param data: Optional file handle or bytestream iterator that is\n                     passed to backend storage.\n        :param purge_props: Optional, defaults to False. If set, the backend\n                            image registry will clear all image properties\n                            and replace them the image properties supplied\n                            in the image_info dictionary's 'properties'\n                            collection.\n        "
+        (session, image_id) = self._get_session_and_image_id(context, id_or_uri)
+        return session.update(context, image_id, image_info, data=data, purge_props=purge_props)
+
+    def delete(self, context, id_or_uri):
+        'Delete the information about an image and mark the image bits for\n        deletion.\n\n        :param context: The `nova.context.Context` object for the request\n        :param id_or_uri: A UUID identifier or an image URI to look up image\n                          information for.\n        '
+        (session, image_id) = self._get_session_and_image_id(context, id_or_uri)
+        return session.delete(context, image_id)
+
+    def download(self, context, id_or_uri, data=None, dest_path=None):
+        "Transfer image bits from Glance or a known source location to the\n        supplied destination filepath.\n\n        :param context: The `nova.context.RequestContext` object for the\n                        request\n        :param id_or_uri: A UUID identifier or an image URI to look up image\n                          information for.\n        :param data: A file object to use in downloading image data.\n        :param dest_path: Filepath to transfer image bits to.\n\n        Note that because of the poor design of the\n        `glance.ImageService.download` method, the function returns different\n        things depending on what arguments are passed to it. If a data argument\n        is supplied but no dest_path is specified (only done in the XenAPI virt\n        driver's image.utils module) then None is returned from the method. If\n        the data argument is not specified but a destination path *is*\n        specified, then a writeable file handle to the destination path is\n        constructed in the method and the image bits written to that file, and\n        again, None is returned from the method. If no data argument is\n        supplied and no dest_path argument is supplied (VMWare and XenAPI virt\n        drivers), then the method returns an iterator to the image bits that\n        the caller uses to write to wherever location it wants. Finally, if the\n        allow_direct_url_schemes CONF option is set to something, then the\n        nova.image.download modules are used to attempt to do an SCP copy of\n        the image bits from a file location to the dest_path and None is\n        returned after retrying one or more download locations (libvirt and\n        Hyper-V virt drivers through nova.virt.images.fetch).\n\n        I think the above points to just how hacky/wacky all of this code is,\n        and the reason it needs to be cleaned up and standardized across the\n        virt driver callers.\n        "
+        (session, image_id) = self._get_session_and_image_id(context, id_or_uri)
+        return session.download(context, image_id, data=data, dst_path=dest_path)
