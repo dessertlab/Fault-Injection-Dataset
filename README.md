@@ -23,10 +23,21 @@ The **failure dataset** includes the raw logs from fault injection experiments i
 
 There is a total of 911 tests: 439 for Nova, 269 for Cinder, and 203 for Neutron. The logs of each experiment are saved in a folder named "`Test_id`", where "`id`" is an incremental number that identifies the test. 
 
-The files "`cinder.csv`", "`neutron.csv`" and "`nova.csv`" are csv file containing the failure analysis of the experiments. The csv files consist of three fields: 
-* **Test**, the "`Test_id`";
-* **Round_1 Failure**, contains "`yes`" if the experiment is failed in round 1, "`no`" if the experiment is not failed in the first round (faulty round).
-* **Round_2 Failure**, contains "`yes`" if the experiment is failed in round 2, "`no`" if the experiment is not failed in the second round (fault-free round).
+The files "`cinder.tsv`", "`neutron.tsv`" and "`nova.tsv`" are tsv file containing the failure analysis of the experiments. The csv files consist of three fields: 
+
+*  **Test**: It is the name of the folder that contains the specific test;
+*  **Fault_Type**: It is the type of the injected fault from the list described in the paper;
+*  **Component**: It is the name of the source code file to be mutated;
+*  **Class**: It is the name of the class which contains the mutated statement;
+*  **Function**: It is the name of the function which contains the mutated statement;
+*  **Fault_Point**: It is the target statement;
+*  **Round_1** is "FAILURE" if the experiment failed in the faulty round, "NO_FAILURE" otherwise;
+*  **Assertion_R1**: if it exists, this field contains the assertion failure during the faulty round;
+*  **API_R1**: if it exists, this field contains the api error occurred during the faulty round;
+*  **Round_2** is "FAILURE" if the experiment failed in the fault-free round, "NO_FAILURE" otherwise;
+*  **Assertion_R2**: if it exists, this field contains the assertion failure during the fault-free round;
+*  **API_R2**: if it exists, this field contains the api error occurred during the fault-free round.
+
 
 
 In this [Github repository](https://github.com/dessertlab/OpenStack-Fault-Injection-Environment) you can find the tools to reproduce these experiments.
